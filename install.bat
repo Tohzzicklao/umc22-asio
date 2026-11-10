@@ -11,4 +11,4 @@ if not exist umc22asio.dll (echo umc22asio.dll not found next to install.bat. & 
 if not exist bin mkdir bin
 copy /y umc22asio.dll bin\umc22asio.dll >nul || (echo Could not copy the DLL: close your ASIO host and try again. & exit /b 1)
 powershell -NoProfile -Command "Start-Process regsvr32 -ArgumentList '/s','%~dp0bin\umc22asio.dll' -Verb RunAs -Wait"
-echo Installed: "UMC22 Low Latency"
+echo Installed: "Low Latency ASIO for UMC22"

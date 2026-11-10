@@ -12,6 +12,7 @@ copy /y umc22asio.dll "%STAGE%\" >nul
 copy /y install.bat "%STAGE%\" >nul
 copy /y README.md "%STAGE%\" >nul
 copy /y CHANGELOG.md "%STAGE%\" >nul
+copy /y LICENSE "%STAGE%\" >nul
 copy /y tools\bin\*.exe "%STAGE%\tools\" >nul
 if exist "dist\%NAME%.zip" del "dist\%NAME%.zip"
 powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%\*' -DestinationPath 'dist\%NAME%.zip'" || exit /b 1

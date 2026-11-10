@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Tohzzicklao
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Test host: loads umc22asio.dll without registering it, opens 2 in / 2 out and counts callbacks (silent output).
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>

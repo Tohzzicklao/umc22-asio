@@ -1,4 +1,15 @@
-// UMC22 Low Latency - ASIO driver (in-process COM DLL) for the Behringer UMC22 (USB Audio CODEC / PCM2902)
+// Low Latency ASIO for UMC22 - ASIO driver (in-process COM DLL) for the Behringer UMC22 (USB Audio CODEC / PCM2902)
+// Copyright (C) 2026 Tohzzicklao
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under the terms of the
+// GNU General Public License as published by the Free Software Foundation, either version 3 of the
+// License, or (at your option) any later version. This program is distributed in the hope that it
+// will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE file for details.
+//
+// Not affiliated with or endorsed by Steinberg, Behringer / Music Tribe or Neural DSP.
+// ASIO is a trademark of Steinberg Media Technologies GmbH.
 //
 // - Opens the UMC22 input and output in WASAPI EXCLUSIVE mode (minimum period ~3 ms).
 // - Mixes into the output the audio of another Windows endpoint captured via loopback
@@ -87,8 +98,9 @@ struct IASIO : public IUnknown {
 // {6B3E2A71-9C4D-4F1E-B8A2-5D7C0E91F3A4}
 static const CLSID CLSID_UMC22 = { 0x6b3e2a71, 0x9c4d, 0x4f1e, { 0xb8, 0xa2, 0x5d, 0x7c, 0x0e, 0x91, 0xf3, 0xa4 } };
 static const wchar_t* kClsidStr = L"{6B3E2A71-9C4D-4F1E-B8A2-5D7C0E91F3A4}";
-static const wchar_t* kDriverNameW = L"UMC22 Low Latency";
-static const char* kDriverName = "UMC22 Low Latency";
+static const wchar_t* kDriverNameW = L"Low Latency ASIO for UMC22";
+static const char* kDriverName = "Low Latency ASIO for UMC22";
+static const wchar_t* kLegacyNameW = L"UMC22 Low Latency"; // name used by v1.0.x, removed on (un)register
 
 static HMODULE g_hInst = nullptr;
 static std::atomic<long> g_locks{ 0 };
@@ -135,7 +147,7 @@ static void ensureConfig() {
     if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     FILE* f = _wfopen(p.c_str(), L"w");
     if (!f) return;
-    fputs("; UMC22 Low Latency - configuration\n"
+    fputs("; Low Latency ASIO for UMC22 - configuration\n"
           "; Device names are substrings of the device name shown in Windows (Sound settings).\n"
           "[driver]\n"
           "render=USB Audio CODEC\n"
@@ -466,7 +478,7 @@ public:
         return 1;
     }
     void getDriverName(char* name) override { strcpy_s(name, 32, kDriverName); }
-    long getDriverVersion() override { return 1; }
+    long getDriverVersion() override { return 0x010100; } // 1.1.0
     void getErrorMessage(char* s) override { strcpy_s(s, 124, err_); }
 
     ASIOError start() override {
@@ -935,6 +947,7 @@ STDAPI DllRegisterServer() {
     wchar_t path[MAX_PATH]; GetModuleFileNameW(g_hInst, path, MAX_PATH);
     std::wstring clsKey = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr;
     std::wstring asioKey = std::wstring(L"SOFTWARE\\ASIO\\") + kDriverNameW;
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\ASIO\\") + kLegacyNameW).c_str());
     LSTATUS s = setStr(HKEY_LOCAL_MACHINE, clsKey, nullptr, kDriverNameW);
     if (s == ERROR_SUCCESS) s = setStr(HKEY_LOCAL_MACHINE, clsKey + L"\\InprocServer32", nullptr, path);
     if (s == ERROR_SUCCESS) s = setStr(HKEY_LOCAL_MACHINE, clsKey + L"\\InprocServer32", L"ThreadingModel", L"Apartment");
@@ -947,5 +960,6 @@ STDAPI DllRegisterServer() {
 STDAPI DllUnregisterServer() {
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr).c_str());
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\ASIO\\") + kDriverNameW).c_str());
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\ASIO\\") + kLegacyNameW).c_str());
     return S_OK;
 }

@@ -1,6 +1,6 @@
-# UMC22 Low Latency — ASIO driver for the Behringer UMC22
+# Low Latency ASIO for UMC22
 
-A Windows (x64) ASIO driver for the **Behringer UMC22** (USB Audio CODEC / PCM2902 chip, which has no official ASIO driver). It gives **low latency** in guitar amp sims such as *Archetype: Nolly X* while **mixing Windows audio (YouTube, Spotify, etc.) into your headphones at the same time**.
+A Windows (x64) ASIO driver for the **Behringer UMC22** (USB Audio CODEC / PCM2902 chip, which has no official ASIO driver). It works with any ASIO host — Neural DSP standalone plugins (Archetype series, etc.), other amp sims, and DAWs such as REAPER or Cubase — giving **low latency** while **mixing Windows audio (YouTube, Spotify, etc.) into your headphones at the same time**.
 
 ## Download
 
@@ -9,7 +9,7 @@ Grab the latest build from the [**Releases**](../../releases/latest) page:
 1. Download `umc22-asio-vX.Y.Z-win64.zip` and extract it anywhere permanent (e.g. `C:\Program Files\UMC22ASIO` or a folder in your user directory).
 2. Close any ASIO host (Nolly X, your DAW…).
 3. Run **`install.bat`** and accept the administrator prompt.
-4. In your host, choose **ASIO → "UMC22 Low Latency"**, 48000 Hz, buffer size 144.
+4. In your host, choose **ASIO → "Low Latency ASIO for UMC22"**, 48000 Hz, buffer size 144.
 
 To uninstall, run `install.bat /u`.
 
@@ -21,7 +21,7 @@ To uninstall, run `install.bat /u`.
 |---|---|
 | FlexASIO / WASAPI shared mode | The UMC22 has a **fixed 10 ms period** in shared mode → high latency |
 | ASIO4ALL / exclusive mode | Low latency, but **no other app can play audio** (YouTube goes silent) |
-| **UMC22 Low Latency** | Exclusive mode at **3 ms** + Windows audio mixed inside the driver |
+| **Low Latency ASIO for UMC22** | Exclusive mode at **3 ms** + Windows audio mixed inside the driver |
 
 ## How it works
 
@@ -37,7 +37,7 @@ Browser/YouTube ─► "High Definition Audio Device" ─► loopback ─► res
 - **Automatic default device switching**: when the driver opens, if Windows uses the UMC22 as its default output, it is moved to the loopback device. It's restored when the driver closes.
 - **Peak limiter** (−0.2 dBFS) instead of hard clipping, and **TPDF dither** to 16-bit.
 - If the host only sends the guitar on the left channel, it is copied to the right (`monoAuto`).
-- The ASIO interface is implemented at the ABI level: **no Steinberg SDK required**.
+- The ASIO interface is implemented at the ABI level: **no Steinberg SDK required** (see [ASIO SDK](#asio-sdk)).
 
 ## Requirements
 
@@ -109,3 +109,28 @@ gh release create v1.0.0 dist\umc22-asio-v1.0.0-win64.zip --title "v1.0.0" --not
 - The UMC22 only accepts 16-bit in exclusive mode.
 - The onboard output also plays the Windows audio (only audible if something is plugged into it).
 - `IPolicyConfig` (used to switch the default device) is an undocumented Windows interface.
+
+## ASIO SDK
+
+This project **does not include, use, or require the Steinberg ASIO SDK**. No SDK source files or headers are part of this repository, and none are needed to build it.
+
+An ASIO driver is an in-process COM object that a host loads and calls through a fixed binary interface (a table of virtual methods plus a few plain C structs). `umc22asio.cpp` declares that interface itself — the method order, calling convention and struct layouts needed for binary compatibility with ASIO hosts — and implements it with original code on top of Windows WASAPI. This is done purely for interoperability, so that existing ASIO hosts can talk to the driver.
+
+For context: Steinberg historically distributed the ASIO SDK under a proprietary license that does not allow redistributing its files, which is why other open-source drivers download it at build time. Since October 2025 Steinberg also offers the ASIO SDK under the GPLv3, so a future version of this project could adopt the official headers without any licensing conflict, as this project is GPLv3 as well.
+
+## License
+
+Copyright (C) 2026 Tohzzicklao
+
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** or (at your option) any later version. It is distributed in the hope that it will be useful, but **without any warranty**. See [`LICENSE`](LICENSE) for the full text.
+
+## Trademarks and disclaimer
+
+This is an independent, unofficial project. It is **not affiliated with, endorsed by, or supported by** Steinberg Media Technologies GmbH, Behringer / Music Tribe, or Neural DSP Technologies.
+
+- ASIO is a trademark and software of Steinberg Media Technologies GmbH.
+- Behringer and UMC22 are trademarks of Music Tribe Global Brands Ltd.
+- Archetype: Nolly X is a product of Neural DSP Technologies.
+- All other trademarks belong to their respective owners and are used only to describe compatibility.
+
+Use at your own risk. Keep your monitoring volume at a safe level, especially when testing a new configuration.

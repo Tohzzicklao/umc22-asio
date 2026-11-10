@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.0 — 2026-11-10
+
+- **Renamed** to "Low Latency ASIO for UMC22". Installing this version removes the old "UMC22 Low Latency" entry; re-select the driver in your host.
+- Licensed under the **GNU GPL v3.0 or later** (`LICENSE` included in the release zip).
+- README: ASIO SDK clarification, license and trademark/disclaimer sections.
+- Driver version reported to hosts: 1.1.0.
+
 ## v1.0.1 — 2026-11-10
 
 - Driver error messages, log output and generated `config.ini` comments are now in English.
@@ -19,4 +26,4 @@ First release.
 
 ## Installation
 
-Extract the zip to a permanent folder, close your ASIO host, run `install.bat` (admin) and select **"UMC22 Low Latency"** in your host. See the README for details.
+Extract the zip to a permanent folder, close your ASIO host, run `install.bat` (admin) and select **"Low Latency ASIO for UMC22"** in your host. See the README for details.

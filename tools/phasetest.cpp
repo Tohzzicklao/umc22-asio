@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Tohzzicklao
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Plays a mono signal (220 Hz + 2500 Hz, identical on L and R) on the loopback endpoint and measures,
 // via loopback capture, the level and phase of those frequencies on each channel
 // (synchronous detection: unaffected by other audio playing at the same time).

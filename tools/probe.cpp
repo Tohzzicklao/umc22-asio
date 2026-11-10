@@ -1,3 +1,5 @@
+// Copyright (C) 2026 Tohzzicklao
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
