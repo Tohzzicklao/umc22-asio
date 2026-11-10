@@ -1,12 +1,12 @@
-// UMC22 Low Latency - driver ASIO (DLL COM in-process) para Behringer UMC22 (USB Audio CODEC / PCM2902)
+// UMC22 Low Latency - ASIO driver (in-process COM DLL) for the Behringer UMC22 (USB Audio CODEC / PCM2902)
 //
-// - Abre la entrada y la salida de la UMC22 en WASAPI EXCLUSIVO (periodo minimo ~3 ms).
-// - Mezcla en la salida el audio de otro endpoint de Windows capturado en loopback
-//   (por defecto "High Definition Audio Device"), para que YouTube/Brave suene a la vez
-//   por los cascos de la UMC22 aunque esta este en modo exclusivo.
+// - Opens the UMC22 input and output in WASAPI EXCLUSIVE mode (minimum period ~3 ms).
+// - Mixes into the output the audio of another Windows endpoint captured via loopback
+//   (by default "High Definition Audio Device"), so YouTube/browser audio plays through
+//   the UMC22 headphones at the same time even though the UMC22 is in exclusive mode.
 // - Config: %APPDATA%\UMC22ASIO\config.ini   Log: %APPDATA%\UMC22ASIO\log.txt
 //
-// Interfaz ASIO reimplementada a nivel ABI (x64), sin el SDK de Steinberg.
+// The ASIO interface is re-implemented at the ABI level (x64), without the Steinberg SDK.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -93,7 +93,7 @@ static const char* kDriverName = "UMC22 Low Latency";
 static HMODULE g_hInst = nullptr;
 static std::atomic<long> g_locks{ 0 };
 
-// ============================================================ utilidades
+// ============================================================ utilities
 static std::wstring appDir() {
     PWSTR p = nullptr; std::wstring s;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p))) { s = p; CoTaskMemFree(p); }
@@ -135,25 +135,25 @@ static void ensureConfig() {
     if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     FILE* f = _wfopen(p.c_str(), L"w");
     if (!f) return;
-    fputs("; UMC22 Low Latency - configuracion\n"
-          "; Los nombres son subcadenas del nombre del dispositivo en Windows (Sonido).\n"
+    fputs("; UMC22 Low Latency - configuration\n"
+          "; Device names are substrings of the device name shown in Windows (Sound settings).\n"
           "[driver]\n"
           "render=USB Audio CODEC\n"
           "capture=USB Audio CODEC\n"
-          "; Dispositivo cuyo audio (YouTube, sistema...) se mezcla en los cascos. Vacio = desactivado.\n"
+          "; Device whose audio (YouTube, system sounds...) is mixed into the headphones. Empty = disabled.\n"
           "loopback=High Definition Audio Device\n"
-          "; Volumen de la mezcla de YouTube (0.0 - 2.0)\n"
+          "; Volume of the Windows/YouTube mix (0.0 - 2.0)\n"
           "ytVolume=1.0\n"
-          "; 1 = si Nolly solo saca la guitarra por L, se copia tambien a R\n"
+          "; 1 = if the host only sends the guitar on L, copy it to R as well\n"
           "monoAuto=1\n"
-          "; Colchon del audio de YouTube en ms (sube si oyes cortes en YouTube)\n"
+          "; Windows/YouTube audio buffer in ms (raise it if YouTube drops out)\n"
           "ytLatencyMs=40\n"
-          "; Buffer ASIO preferido en frames\n"
+          "; Preferred ASIO buffer size in frames\n"
           "preferredBuffer=144\n"
-          "; 1 = al abrir el driver, la salida predeterminada de Windows pasa al dispositivo 'loopback'\n"
-          ";     (YouTube se mezcla solo) y al cerrarlo vuelve a la UMC22\n"
+          "; 1 = while the driver is open, the Windows default output is moved to the 'loopback'\n"
+          ";     device (so its audio gets mixed) and restored to the UMC22 on close\n"
           "autoDefault=1\n"
-          "; 1 = escribe niveles/fase en log.txt cada 5 s (diagnostico)\n"
+          "; 1 = write levels/phase to log.txt every 5 s (diagnostics)\n"
           "debugMeter=0\n", f);
     fclose(f);
 }
@@ -175,7 +175,7 @@ static Config loadConfig() {
 
 static std::wstring lower(std::wstring s) { for (auto& ch : s) ch = (wchar_t)towlower(ch); return s; }
 
-// Busca un endpoint activo cuyo nombre contenga 'needle'. Devuelve su ID.
+// Finds an active endpoint whose friendly name contains 'needle'. Returns its ID.
 static std::wstring findEndpoint(IMMDeviceEnumerator* en, EDataFlow flow, const std::wstring& needle, std::wstring* nameOut) {
     if (needle.empty()) return L"";
     IMMDeviceCollection* col = nullptr; std::wstring result;
@@ -202,7 +202,7 @@ static std::wstring findEndpoint(IMMDeviceEnumerator* en, EDataFlow flow, const 
     return result;
 }
 
-// ---------------------------------------------------------- formato de dispositivo
+// ---------------------------------------------------------- device sample format
 struct DevFmt { int ch = 2, bytes = 2, block = 4; bool flt = false; };
 
 static inline float rdS(const BYTE* p, const DevFmt& f) {
@@ -241,7 +241,7 @@ static void makeFmt(WAVEFORMATEXTENSIBLE& w, int ch, int sr, int bits, int valid
     w.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 }
 
-// Abre un endpoint en exclusivo, event-driven. periodFrames = periodo deseado.
+// Opens an endpoint in exclusive, event-driven mode. periodFrames = requested period.
 static HRESULT openExclusive(IMMDevice* dev, int sr, int periodFrames, HANDLE ev, IAudioClient** out, DevFmt& df, UINT32& bufFrames) {
     IAudioClient* ac = nullptr;
     HRESULT hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&ac);
@@ -276,7 +276,7 @@ static HRESULT openExclusive(IMMDevice* dev, int sr, int periodFrames, HANDLE ev
 }
 
 // ---------------------------------------------------------- FIFOs
-struct Fifo { // estereo float, un solo hilo
+struct Fifo { // stereo float, single thread
     std::vector<float> d; size_t cap = 0, r = 0, n = 0;
     void init(size_t frames) { d.assign(frames * 2, 0.0f); cap = frames; r = n = 0; }
     void push(float l, float rr) {
@@ -290,14 +290,14 @@ struct Fifo { // estereo float, un solo hilo
     void drop(size_t k) { k = std::min(k, n); r = (r + k) % cap; n -= k; }
 };
 
-struct Spsc { // estereo float, 1 productor / 1 consumidor
+struct Spsc { // stereo float, single producer / single consumer
     std::vector<float> d; size_t cap = 0;
     std::atomic<size_t> w{ 0 }, r{ 0 };
     void init(size_t frames) { d.assign(frames * 2, 0.0f); cap = frames; w = 0; r = 0; }
     size_t avail() const { return w.load(std::memory_order_acquire) - r.load(std::memory_order_relaxed); }
     void push(float l, float rr) {
         size_t ww = w.load(std::memory_order_relaxed);
-        if (ww - r.load(std::memory_order_acquire) >= cap) return; // lleno: descarta
+        if (ww - r.load(std::memory_order_acquire) >= cap) return; // full: drop
         d[(ww % cap) * 2] = l; d[(ww % cap) * 2 + 1] = rr;
         w.store(ww + 1, std::memory_order_release);
     }
@@ -310,7 +310,7 @@ struct Spsc { // estereo float, 1 productor / 1 consumidor
     void skip(size_t k) { k = std::min(k, avail()); r.fetch_add(k, std::memory_order_release); }
 };
 
-// Resampler Hermite cubico (4 puntos) con correccion de deriva suavizada y fundidos (YouTube -> salida exclusiva)
+// 4-point cubic Hermite resampler with smoothed drift correction and fades (Windows audio -> exclusive output)
 struct YtMix {
     double pos = 0, step = 1, fillAvg = 0; float h[4][2]{}; bool primed = false;
     float fade = 0.0f, last[2]{};
@@ -324,14 +324,14 @@ struct YtMix {
             ring.skip(fill - (size_t)target);
             fill = (size_t)target; fillAvg = target;
         }
-        // media movil (~0.3 s) para que el jitter de paquetes no module el tono
+        // moving average (~0.3 s) so packet jitter doesn't modulate the pitch
         fillAvg += 0.01 * ((double)fill - fillAvg);
         double err = (fillAvg - target) / target;
         double corr = std::clamp(err * 0.001, -0.002, 0.002);
         step = src / dst * (1.0 + corr);
     }
     void next(Spsc& ring, float& l, float& r) {
-        if (!primed) { // fundido de salida desde la ultima muestra: sin clic al pausar
+        if (!primed) { // fade out from the last sample: no click on pause
             fade = std::max(0.0f, fade - kFadeStep);
             l = last[0] * fade; r = last[1] * fade; return;
         }
@@ -344,7 +344,7 @@ struct YtMix {
         fade = std::min(1.0f, fade + kFadeStep);
         const float t = (float)pos;
         float out[2];
-        for (int c = 0; c < 2; c++) { // interpola entre h[1] y h[2]
+        for (int c = 0; c < 2; c++) { // interpolate between h[1] and h[2]
             float x0 = h[0][c], x1 = h[1][c], x2 = h[2][c], x3 = h[3][c];
             float c1 = 0.5f * (x2 - x0);
             float c2 = x0 - 2.5f * x1 + 2.0f * x2 - 0.5f * x3;
@@ -356,8 +356,8 @@ struct YtMix {
     }
 };
 
-// ---------------------------------------------------------- salida predeterminada de Windows
-// IPolicyConfig (interfaz no documentada, estable desde Windows 7) para cambiar el dispositivo predeterminado.
+// ---------------------------------------------------------- Windows default output
+// IPolicyConfig (undocumented interface, stable since Windows 7) used to change the default device.
 struct __declspec(uuid("f8679f50-850a-41cf-9c72-430f290290c8")) IPolicyConfig : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, WAVEFORMATEX**) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, WAVEFORMATEX**) = 0;
@@ -374,7 +374,7 @@ struct __declspec(uuid("f8679f50-850a-41cf-9c72-430f290290c8")) IPolicyConfig : 
 };
 static const CLSID CLSID_PolicyConfigClient = { 0x870af99c, 0x171d, 0x4f9e, { 0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9 } };
 
-// Ejecuta f en un hilo MTA propio (independiente del apartamento COM del host)
+// Runs f on its own MTA thread (independent of the host's COM apartment)
 template <class F> static void runMta(F f) {
     std::thread t([&] { CoInitializeEx(nullptr, COINIT_MULTITHREADED); f(); CoUninitialize(); });
     t.join();
@@ -402,9 +402,9 @@ static bool setDefaultRender(const std::wstring& id) {
     return ok;
 }
 
-// Limitador de pico (ataque instantaneo, release suave): evita el clipping duro al sumar guitarra + YouTube
+// Peak limiter (instant attack, smooth release): avoids hard clipping when summing guitar + Windows audio
 struct Limiter {
-    float g = 1.0f, thr = 0.98f /* -0.2 dBFS: solo picos reales */, rel = 0.0f;
+    float g = 1.0f, thr = 0.98f /* -0.2 dBFS: real overs only */, rel = 0.0f;
     void init(double sr, double releaseMs) { g = 1.0f; rel = (float)(1.0 - std::exp(-1.0 / (sr * releaseMs / 1000.0))); }
     inline void process(float& l, float& r) {
         float pk = std::max(std::fabs(l), std::fabs(r));
@@ -414,7 +414,7 @@ struct Limiter {
     }
 };
 
-// Dither TPDF para salida de 16 bits
+// TPDF dither for 16-bit output
 struct Dither {
     uint32_t s = 0x12345678u;
     inline float rnd() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return (s >> 8) * (1.0f / 16777216.0f); }
@@ -454,12 +454,12 @@ public:
             if (loopId_ == renderId_) loopId_.clear();
             logf("  render  -> %ls", n1.c_str());
             logf("  capture -> %ls", n2.c_str());
-            logf("  loopback-> %ls", loopId_.empty() ? L"(desactivado)" : n3.c_str());
+            logf("  loopback-> %ls", loopId_.empty() ? L"(disabled)" : n3.c_str());
             en->Release();
         }
         if (SUCCEEDED(hrCo)) CoUninitialize();
         if (renderId_.empty() || captureId_.empty()) {
-            setErr("No se encuentra la UMC22 (USB Audio CODEC). Revisa config.ini.");
+            setErr("UMC22 (USB Audio CODEC) not found. Check config.ini.");
             logf("init FAIL: %s", err_);
             return 0;
         }
@@ -545,16 +545,16 @@ public:
             auto& slot = bi[i].isInput ? inBuf_[ch] : outBuf_[ch];
             slot[0] = (int32_t*)bi[i].buffers[0]; slot[1] = (int32_t*)bi[i].buffers[1];
         }
-        // Si Windows usa la UMC22 como salida, la movemos al dispositivo loopback para liberar la UMC22
+        // If Windows uses the UMC22 as default output, move it to the loopback device to free the UMC22
         if (cfg_.autoDefault && !loopId_.empty() && !switchedDefault_) {
             std::wstring cur = getDefaultRender();
             if (lower(cur) == lower(renderId_) && setDefaultRender(loopId_)) {
                 switchedDefault_ = true;
-                logf("salida predeterminada de Windows -> loopback (se restaurara al cerrar)");
-                Sleep(150); // dar tiempo a las apps a migrar sus streams
+                logf("Windows default output -> loopback device (restored on close)");
+                Sleep(150); // give apps time to migrate their streams
             }
         }
-        // El hilo de audio abre los dispositivos (WASAPI vive en su propio apartamento MTA)
+        // The audio thread opens the devices (WASAPI lives in its own MTA apartment)
         quit_ = false; openResult_ = E_FAIL;
         startEv_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         stoppedEv_ = CreateEventW(nullptr, TRUE, TRUE, nullptr);
@@ -569,11 +569,11 @@ public:
             freeBufs();
             restoreDefault();
             if (openResult_ == AUDCLNT_E_DEVICE_IN_USE)
-                setErr("La UMC22 esta en uso por otra app. Pon Windows/Brave en 'High Definition Audio Device'.");
+                setErr("The UMC22 is in use by another app. Move Windows/browser output to the loopback device.");
             else if (openResult_ == AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED)
-                setErr("Modo exclusivo deshabilitado en las propiedades de la UMC22 (Sonido > Avanzado).");
+                setErr("Exclusive mode is disabled in the UMC22 properties (Sound > Advanced).");
             else
-                setErr("No se pudo abrir la UMC22 en modo exclusivo (ver log.txt).");
+                setErr("Could not open the UMC22 in exclusive mode (see log.txt).");
             logf("createBuffers FAIL hr=0x%08lX", (unsigned long)openResult_);
             return ASE_HWMalfunction;
         }
@@ -591,7 +591,7 @@ public:
         if (stoppedEv_) { CloseHandle(stoppedEv_); stoppedEv_ = nullptr; }
         engineReady_ = false;
         freeBufs();
-        restoreDefault(); // la UMC22 ya esta liberada: las apps pueden volver a ella
+        restoreDefault(); // the UMC22 is released now: apps can go back to it
         return ASE_OK;
     }
     ASIOError controlPanel() override {
@@ -607,16 +607,16 @@ private:
     void restoreDefault() {
         if (!switchedDefault_) return;
         switchedDefault_ = false;
-        // solo si nadie ha cambiado la salida mientras tanto
+        // only if nobody changed the default output in the meantime
         if (lower(getDefaultRender()) == lower(loopId_) && setDefaultRender(renderId_))
-            logf("salida predeterminada de Windows restaurada a la UMC22");
+            logf("Windows default output restored to the UMC22");
     }
     void freeBufs() {
         for (int c = 0; c < 2; c++) { inBuf_[c][0] = inBuf_[c][1] = outBuf_[c][0] = outBuf_[c][1] = nullptr; }
         mem_.clear(); bufSize_ = 0;
     }
 
-    // ---------------------------------------------------- hilo principal de audio
+    // ---------------------------------------------------- main audio thread
     void engineThread(HANDLE opened) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         IMMDeviceEnumerator* en = nullptr; IMMDevice* rDev = nullptr; IMMDevice* cDev = nullptr;
@@ -630,7 +630,7 @@ private:
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en));
         if (SUCCEEDED(hr)) hr = en->GetDevice(renderId_.c_str(), &rDev);
         if (SUCCEEDED(hr)) hr = en->GetDevice(captureId_.c_str(), &cDev);
-        // reintenta un poco si alguna app aun esta soltando la UMC22
+        // retry briefly in case an app is still releasing the UMC22
         for (int tries = 0; SUCCEEDED(hr) || hr == AUDCLNT_E_DEVICE_IN_USE; tries++) {
             if (tries) Sleep(100);
             hr = openExclusive(rDev, sr, bufSize_, rEv, &rCl, rf, rFrames);
@@ -673,17 +673,17 @@ private:
         stampNs_ = (uint64_t)((double)q.QuadPart * 1e9 / (double)f.QuadPart);
         cb_->bufferSwitch(idx, 1);
         samplePos_ += N;
-        // Si el host solo manda guitarra por L (R ausente o en silencio), se copia a R
+        // If the host only sends the guitar on L (R missing or silent), copy it to R
         bool copyL = !outBuf_[1][idx] && outBuf_[0][idx];
         if (cfg_.monoAuto && !copyL && outBuf_[0][idx] && outBuf_[1][idx]) {
             int32_t ml = 0, mr = 0;
             for (long i = 0; i < N; i++) { ml |= outBuf_[0][idx][i]; mr |= outBuf_[1][idx][i]; }
-            // histeresis: R con senal -> stereo al instante; L con senal y R muda durante >1 s -> copia L a R
+            // hysteresis: signal on R -> stereo immediately; signal on L with R silent for >1 s -> copy L to R
             if (mr != 0) monoSilentFrames_ = 0;
             else if (ml != 0) monoSilentFrames_ += N;
             copyL = monoSilentFrames_ > (int64_t)sampleRate_;
         }
-        if (copyL != monoCopying_) { monoCopying_ = copyL; logf("guitarra mono L->R: %s", copyL ? "si" : "no"); }
+        if (copyL != monoCopying_) { monoCopying_ = copyL; logf("mono guitar L->R: %s", copyL ? "on" : "off"); }
         for (long i = 0; i < N; i++) {
             float l = outBuf_[0][idx] ? i2f(outBuf_[0][idx][i]) : 0.0f;
             float r = copyL ? l : (outBuf_[1][idx] ? i2f(outBuf_[1][idx][i]) : 0.0f);
@@ -704,7 +704,7 @@ private:
         Limiter lim; lim.init(dstRate, 150.0);
         Dither dth;
         float pkGtr = 0, pkYt = 0; uint64_t limFrames = 0;
-        // medidor periodico (cada 5 s) para diagnostico
+        // periodic meter (every 5 s) for diagnostics
         struct Meter { double gl = 0, gr = 0, glr = 0, yl = 0, yr = 0, ylr = 0, ol = 0, orr = 0, olr = 0; float pg = 0, py = 0, po = 0; uint64_t lim = 0, n = 0; } mt;
         auto corr = [](double a, double b, double ab) { return ab / std::sqrt(a * b + 1e-30); };
         auto dbf = [](double x) { return x > 1e-10 ? 20.0 * std::log10(x) : -99.0; };
@@ -720,11 +720,11 @@ private:
 
         while (running_) {
             DWORD w = WaitForMultipleObjects(2, evs, FALSE, 500);
-            if (w == WAIT_TIMEOUT) { logf("timeout esperando a la UMC22"); continue; }
+            if (w == WAIT_TIMEOUT) { logf("timeout waiting for the UMC22"); continue; }
             bool capSig = (w == WAIT_OBJECT_0), renSig = (w == WAIT_OBJECT_0 + 1);
             if (capSig && WaitForSingleObject(rEv, 0) == WAIT_OBJECT_0) renSig = true;
 
-            // 1) entrada: solo cuando la captura avisa; descarta paquetes repetidos por posicion
+            // 1) input: only when the capture event fires; drop repeated packets by device position
             HRESULT hr = S_OK; UINT32 pk = 0;
             while (capSig && SUCCEEDED(hr = cc->GetNextPacketSize(&pk)) && pk) {
                 BYTE* d; UINT32 fr; DWORD fl; UINT64 devPos = 0;
@@ -743,16 +743,16 @@ private:
                 capFrames += fr - skip;
                 cc->ReleaseBuffer(fr);
             }
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("captura invalidada"); break; }
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("capture device invalidated"); break; }
             if (!renSig) continue;
             rEvents++;
 
-            // 2) procesar bloques ASIO
+            // 2) process ASIO blocks
             while (inF_.n >= (size_t)N && running_) processBlock();
 
-            // 3) salida + mezcla YouTube
+            // 3) output + Windows audio mix
             hr = rr->GetBuffer(B, &p);
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("salida invalidada"); break; }
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("render device invalidated"); break; }
             if (FAILED(hr)) continue;
             bool ytOn = ytActive_.load(std::memory_order_acquire);
             if (ytOn) yt.block(ytRing_, ytSrcRate_, dstRate, cfg_.ytLatencyMs);
@@ -781,21 +781,21 @@ private:
             rr->ReleaseBuffer(B, 0);
             if (cfg_.debugMeter && GetTickCount64() - lastMeter >= 5000 && mt.n) {
                 double n = (double)mt.n;
-                logf("medidor: guitarra RMS L %.1f R %.1f pico %.1f corr %.2f | YouTube RMS L %.1f R %.1f pico %.1f corr %.2f | salida RMS L %.1f R %.1f pico %.1f corr %.2f | limitador %.1f%% | mono %s",
+                logf("meter: guitar RMS L %.1f R %.1f peak %.1f corr %.2f | loopback RMS L %.1f R %.1f peak %.1f corr %.2f | output RMS L %.1f R %.1f peak %.1f corr %.2f | limiter %.1f%% | mono %s",
                      dbf(std::sqrt(mt.gl / n)), dbf(std::sqrt(mt.gr / n)), dbf(mt.pg), corr(mt.gl, mt.gr, mt.glr),
                      dbf(std::sqrt(mt.yl / n)), dbf(std::sqrt(mt.yr / n)), dbf(mt.py), corr(mt.yl, mt.yr, mt.ylr),
                      dbf(std::sqrt(mt.ol / n)), dbf(std::sqrt(mt.orr / n)), dbf(mt.po), corr(mt.ol, mt.orr, mt.olr),
-                     100.0 * mt.lim / n, monoCopying_ ? "si" : "no");
+                     100.0 * mt.lim / n, monoCopying_ ? "on" : "off");
                 mt = Meter{}; lastMeter = GetTickCount64();
             }
-            // limita la latencia si se acumula
+            // cap latency if it builds up
             if (outF_.n > (size_t)(N + 2 * B)) outF_.drop(outF_.n - (N + B));
         }
         rCl->Stop(); cCl->Stop(); rCl->Reset(); cCl->Reset();
         double secs = (GetTickCount64() - t0) / 1000.0;
-        logf("stats: %.1f s, eventos salida %.0f/s, captura %.0f frames/s, duplicados %llu, underruns %u", secs, rEvents / secs, capFrames / secs, (unsigned long long)dupFrames, underruns);
+        logf("stats: %.1f s, render events %.0f/s, capture %.0f frames/s, duplicates %llu, underruns %u", secs, rEvents / secs, capFrames / secs, (unsigned long long)dupFrames, underruns);
         auto db = [](float x) { return x > 0 ? 20.0 * std::log10(x) : -99.0; };
-        logf("niveles: pico guitarra %.1f dBFS, pico YouTube %.1f dBFS, limitador activo %.1f%% del tiempo",
+        logf("levels: guitar peak %.1f dBFS, loopback peak %.1f dBFS, limiter active %.1f%% of the time",
              db(pkGtr), db(pkYt), 100.0 * limFrames / std::max(1.0, secs * dstRate));
         if (mm) AvRevertMmThreadCharacteristics(mm);
     }
@@ -806,7 +806,7 @@ private:
             cb_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
     }
 
-    // ---------------------------------------------------- loopback (YouTube)
+    // ---------------------------------------------------- loopback (Windows/YouTube audio)
     void startYt() {
         if (loopId_.empty() || ytThread_.joinable()) return;
         ytRun_ = true;
@@ -834,7 +834,7 @@ private:
             ytRing_.init((size_t)mix->nSamplesPerSec); // 1 s
             ytActive_.store(true, std::memory_order_release);
             ac->Start();
-            logf("loopback activo: %d ch %d Hz %s", f.ch, (int)mix->nSamplesPerSec, f.flt ? "float" : "pcm");
+            logf("loopback active: %d ch %d Hz %s", f.ch, (int)mix->nSamplesPerSec, f.flt ? "float" : "pcm");
             while (ytRun_) {
                 Sleep(3);
                 UINT32 pk = 0;
@@ -852,7 +852,7 @@ private:
             }
             ac->Stop();
         } else {
-            logf("loopback no disponible hr=0x%08lX (YouTube no se mezclara)", (unsigned long)hr);
+            logf("loopback unavailable hr=0x%08lX (Windows audio will not be mixed)", (unsigned long)hr);
         }
         ytActive_ = false;
         if (mix) CoTaskMemFree(mix);

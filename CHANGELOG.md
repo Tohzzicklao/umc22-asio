@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.1 — 2026-11-10
+
+- Driver error messages, log output and generated `config.ini` comments are now in English.
+- Diagnostic tools and build scripts translated to English.
+- README: troubleshooting entries for every driver error message.
+
 ## v1.0.0 — 2026-11-10
 
 First release.

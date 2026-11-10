@@ -1,5 +1,7 @@
-// Envia una senal mono (220 Hz + 2500 Hz, identica en L y R) al endpoint HD y mide por loopback
-// el nivel y la fase de esas frecuencias en cada canal (detector sincrono: inmune a YouTube).
+// Plays a mono signal (220 Hz + 2500 Hz, identical on L and R) on the loopback endpoint and measures,
+// via loopback capture, the level and phase of those frequencies on each channel
+// (synchronous detection: unaffected by other audio playing at the same time).
+// Set ID below to your endpoint ID (tools\bin\probe.exe lists the devices).
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -68,7 +70,7 @@ int main() {
         double mL = hypot(re[k][0], im[k][0]), mR = hypot(re[k][1], im[k][1]);
         double dp = (atan2(im[k][1], re[k][1]) - atan2(im[k][0], re[k][0])) * 180 / PI;
         while (dp > 180) dp -= 360; while (dp < -180) dp += 360;
-        printf("%5.0f Hz: nivel L %.1f dB, R %.1f dB, diferencia R/L %.2f dB, fase R-L %.1f grados\n",
+        printf("%5.0f Hz: level L %.1f dB, R %.1f dB, R/L difference %.2f dB, R-L phase %.1f degrees\n",
                FR[k], 20 * log10(2 * mL / n), 20 * log10(2 * mR / n), 20 * log10(mR / mL), dp);
     }
 }

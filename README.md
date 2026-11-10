@@ -67,8 +67,10 @@ Log file: `%APPDATA%\UMC22ASIO\log.txt` (rotated to `log.old.txt` above 512 KB).
 
 | Symptom | Cause / fix |
 |---|---|
-| "La UMC22 esta en uso por otra app" (UMC22 in use) | An app has the UMC22 open and doesn't follow the default device. Change its output in *Volume mixer* |
-| No YouTube audio | Make sure the browser/Windows plays to the `loopback` device and that `log.txt` shows `loopback activo` |
+| "The UMC22 is in use by another app" | An app has the UMC22 open and doesn't follow the default device. Change its output in *Volume mixer* |
+| "Exclusive mode is disabled in the UMC22 properties" | Sound settings → UMC22 → *More sound settings* → *Advanced* → enable "Allow applications to take exclusive control" |
+| "UMC22 (USB Audio CODEC) not found" | Interface unplugged, or a different device name: adjust `render` / `capture` in `config.ini` |
+| No YouTube audio | Make sure the browser/Windows plays to the `loopback` device and that `log.txt` shows `loopback active` |
 | YouTube sounds odd / weak vocals | Disable *Audio enhancements* and *Spatial sound* on the loopback device. If it also happens without the driver, check the headphone plug: a TRRS headset plug in a TRS jack, or a half-inserted plug, produces L−R cancellation |
 | YouTube dropouts | Raise `ytLatencyMs` to 60–80 |
 | Guitar crackles | Increase the buffer size in your host (192, 256) |
@@ -107,4 +109,3 @@ gh release create v1.0.0 dist\umc22-asio-v1.0.0-win64.zip --title "v1.0.0" --not
 - The UMC22 only accepts 16-bit in exclusive mode.
 - The onboard output also plays the Windows audio (only audible if something is plugged into it).
 - `IPolicyConfig` (used to switch the default device) is an undocumented Windows interface.
-- Driver messages, config comments and logs are in Spanish.

@@ -1,4 +1,4 @@
-// Host de prueba: carga umc22asio.dll sin registrar, abre 2in/2out y cuenta callbacks (salida en silencio).
+// Test host: loads umc22asio.dll without registering it, opens 2 in / 2 out and counts callbacks (silent output).
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <cstdio>
@@ -37,24 +37,24 @@ static long msg(long sel, long, void*, double*) { printf("asioMessage %ld\n", se
 int main(int argc, char** argv) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     HMODULE m = LoadLibraryW(L"umc22asio.dll");
-    if (!m) { printf("LoadLibrary fallo %lu\n", GetLastError()); return 1; }
+    if (!m) { printf("LoadLibrary failed %lu\n", GetLastError()); return 1; }
     auto gco = (HRESULT(__stdcall*)(REFCLSID, REFIID, void**))GetProcAddress(m, "DllGetClassObject");
     IClassFactory* f = nullptr; gco(CLSID_UMC22, IID_IClassFactory, (void**)&f);
     IASIO* a = nullptr; HRESULT hr = f->CreateInstance(nullptr, CLSID_UMC22, (void**)&a);
     printf("CreateInstance hr=0x%08lX\n", hr); if (!a) return 1;
     char buf[128]; a->getDriverName(buf); printf("driver: %s\n", buf);
-    if (!a->init(nullptr)) { a->getErrorMessage(buf); printf("init fallo: %s\n", buf); return 1; }
+    if (!a->init(nullptr)) { a->getErrorMessage(buf); printf("init failed: %s\n", buf); return 1; }
     long in, out, mn, mx, pr, gr; a->getChannels(&in, &out); a->getBufferSize(&mn, &mx, &pr, &gr);
-    printf("canales %ld/%ld  buffer min %ld max %ld pref %ld gran %ld\n", in, out, mn, mx, pr, gr);
+    printf("channels %ld/%ld  buffer min %ld max %ld pref %ld gran %ld\n", in, out, mn, mx, pr, gr);
     if (argc > 1) N = atol(argv[1]); else N = pr;
     printf("setSampleRate(48000)=%ld\n", a->setSampleRate(48000));
     for (int c = 0; c < 4; c++) { bi[c].isInput = c < 2; bi[c].channelNum = c % 2; }
     ASIOCallbacks cb{ bs, src, msg, nullptr };
     ASIOError e = a->createBuffers(bi, 4, N, &cb);
     if (e) { a->getErrorMessage(buf); printf("createBuffers=%ld: %s\n", e, buf); a->Release(); return 1; }
-    long li, lo; a->getLatencies(&li, &lo); printf("latencias in %ld out %ld frames (%.2f / %.2f ms)\n", li, lo, li / 48.0, lo / 48.0);
+    long li, lo; a->getLatencies(&li, &lo); printf("latencies in %ld out %ld frames (%.2f / %.2f ms)\n", li, lo, li / 48.0, lo / 48.0);
     a->start(); Sleep(3000); a->stop();
-    printf("callbacks en 3 s: %d (esperado ~%d), pico entrada %.4f\n", calls.load(), (int)(3 * 48000 / N), peak);
+    printf("callbacks in 3 s: %d (expected ~%d), input peak %.4f\n", calls.load(), (int)(3 * 48000 / N), peak);
     a->disposeBuffers(); a->Release();
     return 0;
 }
