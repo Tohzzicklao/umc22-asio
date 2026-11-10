@@ -58,10 +58,10 @@
 
   <rect class="box hw"  x="210" y="177" width="160" height="60" rx="8"/>
   <text class="t" x="290" y="203" text-anchor="middle">UMC22 output</text>
-  <text class="s" x="290" y="221" text-anchor="middle">headphone jack</text>
+  <text class="s" x="290" y="221" text-anchor="middle">phones + line outs</text>
 
   <rect class="box hw"  x="20"  y="177" width="160" height="60" rx="8"/>
-  <text class="t" x="100" y="203" text-anchor="middle">Headphones</text>
+  <text class="t" x="100" y="203" text-anchor="middle">Phones / monitors</text>
   <text class="s" x="100" y="221" text-anchor="middle">guitar + YouTube</text>
 
   <!-- row 3: Windows audio -->

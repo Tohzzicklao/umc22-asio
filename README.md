@@ -3,7 +3,7 @@
 # Low Latency ASIO for UMC22
 
 **A low-latency ASIO driver for the Behringer UMC22 that keeps the rest of Windows audible.**<br>
-Play through Neural DSP Archetype plugins or your DAW at 3 ms while YouTube plays in the same headphones.
+Play through Neural DSP Archetype plugins or your DAW at 3 ms while YouTube plays through the same headphones or monitors.
 
 [![Latest release](https://img.shields.io/github/v/release/Tohzzicklao/umc22-asio?label=release&color=0969da)](https://github.com/Tohzzicklao/umc22-asio/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
@@ -24,7 +24,7 @@ The Behringer UMC22 (USB Audio CODEC / PCM2902) has **no official ASIO driver**.
 |---|---|---|
 | FlexASIO / WASAPI shared mode | High: the UMC22 has a **fixed 10 ms period** in shared mode | ✅ Audible |
 | ASIO4ALL / exclusive mode | Low | ❌ Silent: the device is locked |
-| **Low Latency ASIO for UMC22** | **Low: 3 ms period** in exclusive mode | ✅ **Mixed into the headphones by the driver** |
+| **Low Latency ASIO for UMC22** | **Low: 3 ms period** in exclusive mode | ✅ **Mixed into the UMC22 output by the driver** |
 
 <p align="center">
   <img src="docs/latency.svg" alt="UMC22 minimum device period: 10 ms in shared mode vs 3 ms in exclusive mode" width="680">
@@ -33,7 +33,7 @@ The Behringer UMC22 (USB Audio CODEC / PCM2902) has **no official ASIO driver**.
 ## Features
 
 - **WASAPI exclusive input and output** at the device's minimum period (144 frames @ 48 kHz = 3 ms), event-driven, with MMCSS "Pro Audio" scheduling.
-- **Windows audio mixing**: browser, music players and system sounds are captured via WASAPI loopback and mixed into the headphone output.
+- **Windows audio mixing**: browser, music players and system sounds are captured via WASAPI loopback and mixed into the UMC22 output (headphones and monitor outputs).
 - **Automatic output switching**: the Windows default output is moved off the UMC22 while the driver is open and restored when it closes.
 - **Clean summing**: cubic Hermite resampler with smoothed clock-drift correction, click-free fades, a −0.2 dBFS peak limiter and TPDF dither to 16-bit.
 - **Mono guitar fix**: if the host only sends the left channel, it's copied to the right automatically.
@@ -81,18 +81,20 @@ To uninstall, run `install.bat /u`.
 2. Driver type **ASIO**, device **"Low Latency ASIO for UMC22"**.
 3. Sample rate **48000 Hz**, buffer size **144**.
 4. Select the input channel your guitar is plugged into (**UMC22 In 1** or **In 2**) and outputs **UMC22 Out L / R**.
-5. Play something on YouTube: it comes through the same headphones.
+5. Play something on YouTube: it comes through the same headphones or monitors.
 
 ## How it works
 
 <p align="center">
-  <img src="docs/signal-flow.svg" alt="Signal flow: guitar to UMC22 input, exclusive capture, ASIO host, mixer with Windows audio from loopback capture and resampler, exclusive render, UMC22 output to headphones" width="100%">
+  <img src="docs/signal-flow.svg" alt="Signal flow: guitar to UMC22 input, exclusive capture, ASIO host, mixer with Windows audio from loopback capture and resampler, exclusive render, UMC22 output to headphones and monitors" width="100%">
 </p>
 
 1. **Guitar path.** The UMC22 input is opened in WASAPI exclusive mode. Each capture packet is converted to 32-bit and delivered to the host through the ASIO double buffers. Packets are de-duplicated by device position so the host always sees a continuous stream.
 2. **Host processing.** The host (e.g. Archetype: Nolly X) processes the block and returns the output buffer.
 3. **Windows audio.** While the driver is running, Windows plays to another device (by default the onboard "High Definition Audio Device"). The driver records that device through WASAPI loopback, resamples it to the driver's sample rate and compensates for the clock drift between both devices.
 4. **Mix and output.** Guitar and Windows audio are summed, passed through a peak limiter, dithered to 16-bit and written to the UMC22 output in exclusive mode.
+
+> **Where you hear it:** the mix goes to the UMC22's stereo output, so it reaches **everything connected to the UMC22**: headphones and studio monitors or an amplifier on its line outputs. The onboard output used for loopback is only the *source* of the Windows audio: anything plugged into it plays Windows audio alone, without the guitar. The output device is set by `render` in `config.ini` (tested with the UMC22 only).
 
 **Typical latency** reported to the host at 48 kHz with a 144-sample buffer: **3.0 ms input / 6.0 ms output**, not counting USB and converter latency.
 
@@ -103,7 +105,7 @@ To uninstall, run `install.bat /u`.
 | Key | Default | Description |
 |---|---|---|
 | `render` / `capture` | `USB Audio CODEC` | Substring of the output / input device name |
-| `loopback` | `High Definition Audio Device` | Device whose audio is mixed into the headphones (empty = disabled) |
+| `loopback` | `High Definition Audio Device` | Device whose audio is mixed into the UMC22 output (empty = disabled) |
 | `ytVolume` | `1.0` | Volume of the Windows audio mix (0–2) |
 | `ytLatencyMs` | `40` | Buffer for the Windows audio; raise it if it drops out |
 | `preferredBuffer` | `144` | Preferred ASIO buffer size (frames) |
