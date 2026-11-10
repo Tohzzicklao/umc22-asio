@@ -1,0 +1,9 @@
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+bin/
+tools/bin/
