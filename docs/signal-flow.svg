@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Low Latency ASIO for UMC22 — signal flow</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+    <style>
+      .t  { font-size: 14px; font-weight: 600; fill: #1f2328; }
+      .s  { font-size: 11.5px; fill: #57606a; }
+      .hw { fill: #fff4e5; stroke: #d4761f; }
+      .win{ fill: #f6f8fa; stroke: #8c959f; }
+      .drv{ fill: #ddf4ff; stroke: #0969da; }
+      .host{ fill: #fbefff; stroke: #8250df; }
+      .box{ stroke-width: 1.5; }
+      .ln { stroke: #57606a; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <!-- card background (keeps the diagram legible in GitHub dark mode) -->
+  <rect x="0.5" y="0.5" width="999" height="439" rx="14" fill="#ffffff" stroke="#d0d7de"/>
+
+  <!-- driver boundary -->
+  <rect x="395" y="30" width="400" height="342" rx="12" fill="#f3f9ff" stroke="#0969da" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text x="409" y="51" font-size="12" font-weight="700" fill="#0969da" letter-spacing="0.4">LOW LATENCY ASIO FOR UMC22</text>
+
+  <!-- row 1: guitar in -->
+  <rect class="box hw"  x="20"  y="62" width="160" height="60" rx="8"/>
+  <text class="t" x="100" y="88" text-anchor="middle">Guitar</text>
+  <text class="s" x="100" y="106" text-anchor="middle">instrument input</text>
+
+  <rect class="box hw"  x="210" y="62" width="160" height="60" rx="8"/>
+  <text class="t" x="290" y="88" text-anchor="middle">UMC22 input</text>
+  <text class="s" x="290" y="106" text-anchor="middle">USB Audio CODEC</text>
+
+  <rect class="box drv" x="420" y="62" width="160" height="60" rx="8"/>
+  <text class="t" x="500" y="88" text-anchor="middle">Exclusive capture</text>
+  <text class="s" x="500" y="106" text-anchor="middle">WASAPI · 3 ms period</text>
+
+  <rect class="box drv" x="610" y="62" width="160" height="60" rx="8"/>
+  <text class="t" x="690" y="88" text-anchor="middle">ASIO input buffers</text>
+  <text class="s" x="690" y="106" text-anchor="middle">16-bit → Int32</text>
+
+  <!-- ASIO host (spans rows 1-2) -->
+  <rect class="box host" x="820" y="62" width="160" height="175" rx="8"/>
+  <text class="t" x="900" y="130" text-anchor="middle">ASIO host</text>
+  <text class="s" x="900" y="152" text-anchor="middle">Neural DSP Archetype</text>
+  <text class="s" x="900" y="169" text-anchor="middle">standalone plugins,</text>
+  <text class="s" x="900" y="186" text-anchor="middle">REAPER, Cubase…</text>
+
+  <!-- row 2: output (flows right to left) -->
+  <rect class="box drv" x="610" y="177" width="160" height="60" rx="8"/>
+  <text class="t" x="690" y="203" text-anchor="middle">Mixer</text>
+  <text class="s" x="690" y="221" text-anchor="middle">limiter · TPDF dither</text>
+
+  <rect class="box drv" x="420" y="177" width="160" height="60" rx="8"/>
+  <text class="t" x="500" y="203" text-anchor="middle">Exclusive render</text>
+  <text class="s" x="500" y="221" text-anchor="middle">WASAPI · 3 ms period</text>
+
+  <rect class="box hw"  x="210" y="177" width="160" height="60" rx="8"/>
+  <text class="t" x="290" y="203" text-anchor="middle">UMC22 output</text>
+  <text class="s" x="290" y="221" text-anchor="middle">headphone jack</text>
+
+  <rect class="box hw"  x="20"  y="177" width="160" height="60" rx="8"/>
+  <text class="t" x="100" y="203" text-anchor="middle">Headphones</text>
+  <text class="s" x="100" y="221" text-anchor="middle">guitar + YouTube</text>
+
+  <!-- row 3: Windows audio -->
+  <rect class="box win" x="20"  y="292" width="160" height="60" rx="8"/>
+  <text class="t" x="100" y="318" text-anchor="middle">Browser / apps</text>
+  <text class="s" x="100" y="336" text-anchor="middle">YouTube, Spotify…</text>
+
+  <rect class="box win" x="210" y="292" width="160" height="60" rx="8"/>
+  <text class="t" x="290" y="318" text-anchor="middle">Onboard audio</text>
+  <text class="s" x="290" y="336" text-anchor="middle">Windows default output</text>
+
+  <rect class="box drv" x="420" y="292" width="160" height="60" rx="8"/>
+  <text class="t" x="500" y="318" text-anchor="middle">Loopback capture</text>
+  <text class="s" x="500" y="336" text-anchor="middle">WASAPI shared</text>
+
+  <rect class="box drv" x="610" y="292" width="160" height="60" rx="8"/>
+  <text class="t" x="690" y="318" text-anchor="middle">Resampler</text>
+  <text class="s" x="690" y="336" text-anchor="middle">Hermite · drift correction</text>
+
+  <!-- arrows row 1 -->
+  <line class="ln" x1="180" y1="92" x2="208" y2="92"/>
+  <line class="ln" x1="370" y1="92" x2="418" y2="92"/>
+  <line class="ln" x1="580" y1="92" x2="608" y2="92"/>
+  <line class="ln" x1="770" y1="92" x2="818" y2="92"/>
+  <!-- host output down to mixer -->
+  <line class="ln" x1="820" y1="207" x2="772" y2="207"/>
+  <!-- arrows row 2 (right to left) -->
+  <line class="ln" x1="610" y1="207" x2="582" y2="207"/>
+  <line class="ln" x1="420" y1="207" x2="372" y2="207"/>
+  <line class="ln" x1="210" y1="207" x2="182" y2="207"/>
+  <!-- arrows row 3 -->
+  <line class="ln" x1="180" y1="322" x2="208" y2="322"/>
+  <line class="ln" x1="370" y1="322" x2="418" y2="322"/>
+  <line class="ln" x1="580" y1="322" x2="608" y2="322"/>
+  <line class="ln" x1="690" y1="292" x2="690" y2="239"/>
+
+  <!-- legend -->
+  <g font-size="12" fill="#57606a">
+    <rect class="box hw"   x="230" y="400" width="14" height="14" rx="3"/><text x="252" y="411">Hardware</text>
+    <rect class="box win"  x="345" y="400" width="14" height="14" rx="3"/><text x="367" y="411">Windows</text>
+    <rect class="box drv"  x="455" y="400" width="14" height="14" rx="3"/><text x="477" y="411">This driver</text>
+    <rect class="box host" x="580" y="400" width="14" height="14" rx="3"/><text x="602" y="411">ASIO host application</text>
+  </g>
+</svg>
