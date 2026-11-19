@@ -55,8 +55,14 @@ int main(int argc, char** argv) {
     ASIOError e = a->createBuffers(bi, 4, N, &cb);
     if (e) { a->getErrorMessage(buf); printf("createBuffers=%ld: %s\n", e, buf); a->Release(); return 1; }
     long li, lo; a->getLatencies(&li, &lo); printf("latencies in %ld out %ld frames (%.2f / %.2f ms)\n", li, lo, li / 48.0, lo / 48.0);
-    a->start(); Sleep(3000); a->stop();
-    printf("callbacks in 3 s: %d (expected ~%d), input peak %.4f\n", calls.load(), (int)(3 * 48000 / N), peak);
+    int secs = argc > 2 ? atoi(argv[2]) : 3; if (secs < 1) secs = 3;
+    bool panel = argc > 3 && !strcmp(argv[3], "panel");
+    a->start();
+    if (panel) a->controlPanel(); // modal: returns when the settings window is closed
+    else Sleep(secs * 1000);
+    a->stop();
+    if (panel) printf("callbacks while the panel was open: %d\n", calls.load());
+    else printf("callbacks in %d s: %d (expected ~%d), input peak %.4f\n", secs, calls.load(), (int)(secs * 48000 / N), peak);
     a->disposeBuffers(); a->Release();
     return 0;
 }

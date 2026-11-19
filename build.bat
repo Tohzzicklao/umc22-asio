@@ -8,7 +8,7 @@ set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 cd /d %~dp0
 
-cl /nologo /std:c++17 /EHsc /O2 /W3 /MT /LD umc22asio.cpp /link /DEF:umc22asio.def /OUT:umc22asio.dll || exit /b 1
+cl /nologo /std:c++17 /EHsc /O2 /W3 /MT /LD umc22asio.cpp /link /DEF:umc22asio.def /MANIFEST:EMBED,ID=2 /OUT:umc22asio.dll || exit /b 1
 
 if not exist tools\bin mkdir tools\bin
 for %%t in (testhost probe phasetest) do (

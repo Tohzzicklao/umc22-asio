@@ -31,6 +31,7 @@
 #include <avrt.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <atomic>
 #include <vector>
 #include <string>
@@ -46,6 +47,11 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "comctl32.lib")
+// control panel uses the modern (v6) common controls; build.bat embeds the manifest as resource ID 2
+#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 // ============================================================ ABI ASIO
 typedef long ASIOBool;
@@ -140,6 +146,7 @@ struct Config {
     long preferredBuffer = 144;
     bool autoDefault = true;
     bool debugMeter = false;
+    bool lowLatency = true;
 };
 
 static void ensureConfig() {
@@ -166,7 +173,10 @@ static void ensureConfig() {
           ";     device (so its audio gets mixed) and restored to the UMC22 on close\n"
           "autoDefault=1\n"
           "; 1 = write levels/phase to log.txt every 5 s (diagnostics)\n"
-          "debugMeter=0\n", f);
+          "debugMeter=0\n"
+          "; 1 = no extra output buffer when the device runs at the ASIO buffer size (one buffer\n"
+          ";     less output latency: -3 ms at 144 frames). Set to 0 if you hear clicks.\n"
+          "lowLatency=1\n", f);
     fclose(f);
 }
 
@@ -182,6 +192,7 @@ static Config loadConfig() {
     c.preferredBuffer = std::clamp<long>(GetPrivateProfileIntW(L"driver", L"preferredBuffer", 144, p.c_str()), 32, 2048);
     c.autoDefault = GetPrivateProfileIntW(L"driver", L"autoDefault", 1, p.c_str()) != 0;
     c.debugMeter = GetPrivateProfileIntW(L"driver", L"debugMeter", 0, p.c_str()) != 0;
+    c.lowLatency = GetPrivateProfileIntW(L"driver", L"lowLatency", 1, p.c_str()) != 0;
     return c;
 }
 
@@ -263,17 +274,20 @@ static HRESULT openExclusive(IMMDevice* dev, int sr, int periodFrames, HANDLE ev
     // Keep the real reason of the failure: if every format fails with the same non-format
     // error (device in use, exclusive mode disabled...), return that instead of UNSUPPORTED_FORMAT.
     HRESULT realHr = S_OK; bool sameHr = true;
+    char tried[512] = ""; // rejected formats, logged only if none works (the UMC22 always rejects 24-bit)
     for (int chs : {2, 1}) {
         for (auto t : tries) {
             makeFmt(w, chs, sr, t.bits, t.valid);
             HRESULT fhr = ac->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.Format, nullptr);
             if (fhr == S_OK) { found = true; break; }
-            logf("  IsFormatSupported %d ch %d/%d-bit %d Hz -> hr=0x%08lX", chs, t.bits, t.valid, sr, (unsigned long)fhr);
+            size_t len = strlen(tried);
+            _snprintf_s(tried + len, sizeof tried - len, _TRUNCATE, " %dch/%d/%d:0x%08lX", chs, t.bits, t.valid, (unsigned long)fhr);
             if (realHr == S_OK) realHr = fhr; else if (realHr != fhr) sameHr = false;
         }
         if (found) break;
     }
     if (!found) {
+        logf("  no exclusive format at %d Hz (channels/bits/valid:hr):%s", sr, tried);
         ac->Release();
         if (sameHr && FAILED(realHr) && realHr != AUDCLNT_E_UNSUPPORTED_FORMAT && realHr != S_FALSE) return realHr;
         return AUDCLNT_E_UNSUPPORTED_FORMAT;
@@ -464,14 +478,20 @@ public:
     // IASIO
     ASIOBool init(void*) override {
         cfg_ = loadConfig();
+        applyLive(cfg_);
         logf("init: render='%ls' capture='%ls' loopback='%ls'", cfg_.render.c_str(), cfg_.capture.c_str(), cfg_.loopback.c_str());
         HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         IMMDeviceEnumerator* en = nullptr;
         bool ok = SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en)));
         if (ok) {
             std::wstring n1, n2, n3;
-            renderId_ = findEndpoint(en, eRender, cfg_.render, &n1);
-            captureId_ = findEndpoint(en, eCapture, cfg_.capture, &n2);
+            // a UMC22 plugged in a moment ago can take a little while to show up in Windows
+            for (int tries = 0; tries < 6; tries++) {
+                if (tries) Sleep(200);
+                renderId_ = findEndpoint(en, eRender, cfg_.render, &n1);
+                captureId_ = findEndpoint(en, eCapture, cfg_.capture, &n2);
+                if (!renderId_.empty() && !captureId_.empty()) break;
+            }
             loopId_ = findEndpoint(en, eRender, cfg_.loopback, &n3);
             if (loopId_ == renderId_) loopId_.clear();
             logf("  render  -> %ls", n1.c_str());
@@ -488,13 +508,13 @@ public:
         return 1;
     }
     void getDriverName(char* name) override { strcpy_s(name, 32, kDriverName); }
-    long getDriverVersion() override { return 0x010100; } // 1.1.0
+    long getDriverVersion() override { return 0x010200; } // 1.2.0
     void getErrorMessage(char* s) override { strcpy_s(s, 124, err_); }
 
     ASIOError start() override {
         if (!engineReady_) return ASE_InvalidMode;
         if (running_) return ASE_OK;
-        samplePos_ = 0;
+        samplePos_ = 0; underrunsLive_ = 0;
         startYt();
         running_ = true;
         ResetEvent(stoppedEv_);
@@ -514,7 +534,7 @@ public:
     ASIOError getChannels(long* in, long* out) override { *in = 2; *out = 2; return ASE_OK; }
     ASIOError getLatencies(long* in, long* out) override {
         long b = engineReady_ ? (long)devFrames_ : cfg_.preferredBuffer;
-        long n = bufSize_ ? bufSize_ : cfg_.preferredBuffer;
+        long n = engineReady_ ? outPrime_ : (bufSize_ ? bufSize_ : cfg_.preferredBuffer);
         *in = b; *out = b + n; return ASE_OK;
     }
     ASIOError getBufferSize(long* mn, long* mx, long* pref, long* gran) override {
@@ -567,15 +587,7 @@ public:
             auto& slot = bi[i].isInput ? inBuf_[ch] : outBuf_[ch];
             slot[0] = (int32_t*)bi[i].buffers[0]; slot[1] = (int32_t*)bi[i].buffers[1];
         }
-        // If Windows uses the UMC22 as default output, move it to the loopback device to free the UMC22
-        if (cfg_.autoDefault && !loopId_.empty() && !switchedDefault_) {
-            std::wstring cur = getDefaultRender();
-            if (lower(cur) == lower(renderId_) && setDefaultRender(loopId_)) {
-                switchedDefault_ = true;
-                logf("Windows default output -> loopback device (restored on close)");
-                Sleep(150); // give apps time to migrate their streams
-            }
-        }
+        if (!switchedDefault_) moveDefaultOff();
         // The audio thread opens the devices (WASAPI lives in its own MTA apartment)
         quit_ = false; openResult_ = E_FAIL;
         startEv_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -600,7 +612,7 @@ public:
             return ASE_HWMalfunction;
         }
         engineReady_ = true;
-        logf("createBuffers ok: asio=%ld frames, device period=%u frames, %.0f Hz", size, devFrames_, sampleRate_);
+        logf("createBuffers ok: asio=%ld frames, device period=%u frames, %.0f Hz, output slack %ld frames", size, devFrames_, sampleRate_, outPrime_);
         return ASE_OK;
     }
     ASIOError disposeBuffers() override {
@@ -616,15 +628,31 @@ public:
         restoreDefault(); // the UMC22 is released now: apps can go back to it
         return ASE_OK;
     }
-    ASIOError controlPanel() override {
-        ensureConfig();
-        ShellExecuteW(nullptr, L"open", L"notepad.exe", configPath().c_str(), nullptr, SW_SHOWNORMAL);
-        return ASE_OK;
-    }
+    ASIOError controlPanel() override;
     ASIOError future(long, void*) override { return ASE_InvalidParameter; }
     ASIOError outputReady() override { return ASE_NotPresent; }
 
+    // ---------------------------------------------------- control panel interface
+    struct Live {
+        bool ready, running, lost; long buf, prime; UINT32 dev; double sr; unsigned underruns;
+        float in[2], out[2], yt; // peaks since the previous call (linear)
+    };
+    void live(Live& l) {
+        l.ready = engineReady_; l.running = running_; l.lost = deviceLost_;
+        l.buf = bufSize_; l.prime = outPrime_; l.dev = devFrames_; l.sr = sampleRate_; l.underruns = underrunsLive_;
+        for (int c = 0; c < 2; c++) { l.in[c] = pkIn_[c].exchange(0); l.out[c] = pkOut_[c].exchange(0); }
+        l.yt = pkYt_.exchange(0);
+    }
+    // settings that take effect immediately, without reopening the device
+    void applyLive(const Config& c) {
+        liveVol_ = c.ytVolume; liveYtLat_ = c.ytLatencyMs; liveMono_ = c.monoAuto; liveMeter_ = c.debugMeter;
+    }
+    void setLiveVolume(float v) { liveVol_ = v; }
+    bool canReset() const { return engineReady_ && cb_ && cb_->asioMessage; }
+    void resetFromPanel() { requestReset("settings changed in the control panel"); }
+
 private:
+    static void pubMax(std::atomic<float>& a, float v) { if (v > a.load(std::memory_order_relaxed)) a.store(v, std::memory_order_relaxed); }
     void setErr(const char* s) { strncpy_s(err_, s, _TRUNCATE); }
     void restoreDefault() {
         if (!switchedDefault_) return;
@@ -639,32 +667,97 @@ private:
     }
 
     // ---------------------------------------------------- main audio thread
-    void engineThread(HANDLE opened) {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        IMMDeviceEnumerator* en = nullptr; IMMDevice* rDev = nullptr; IMMDevice* cDev = nullptr;
+    // The exclusive WASAPI streams of the UMC22 (render + capture)
+    struct Streams {
         IAudioClient* rCl = nullptr; IAudioClient* cCl = nullptr;
         IAudioRenderClient* rr = nullptr; IAudioCaptureClient* cc = nullptr;
-        HANDLE rEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        HANDLE cEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         DevFmt rf, cf; UINT32 rFrames = 0, cFrames = 0;
-        int sr = (int)sampleRate_;
+        bool open() const { return rr && cc; }
+        void release() {
+            if (rr) rr->Release(); if (cc) cc->Release();
+            if (rCl) rCl->Release(); if (cCl) cCl->Release();
+            rr = nullptr; cc = nullptr; rCl = nullptr; cCl = nullptr;
+        }
+    };
 
-        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en));
-        if (SUCCEEDED(hr)) hr = en->GetDevice(renderId_.c_str(), &rDev);
+    HRESULT openStreams(IMMDeviceEnumerator* en, HANDLE rEv, HANDLE cEv, Streams& s, bool quiet) {
+        IMMDevice* rDev = nullptr; IMMDevice* cDev = nullptr;
+        const int sr = (int)sampleRate_;
+        HRESULT hr = en->GetDevice(renderId_.c_str(), &rDev);
         if (SUCCEEDED(hr)) hr = en->GetDevice(captureId_.c_str(), &cDev);
         // retry briefly in case an app is still releasing the UMC22
         for (int tries = 0; SUCCEEDED(hr) || hr == AUDCLNT_E_DEVICE_IN_USE; tries++) {
             if (tries) Sleep(100);
-            hr = openExclusive(rDev, sr, bufSize_, rEv, &rCl, rf, rFrames);
+            hr = openExclusive(rDev, sr, bufSize_, rEv, &s.rCl, s.rf, s.rFrames);
             if (hr != AUDCLNT_E_DEVICE_IN_USE || tries >= 10) break;
         }
-        if (FAILED(hr)) logf("render open hr=0x%08lX", (unsigned long)hr);
-        if (SUCCEEDED(hr)) { hr = openExclusive(cDev, sr, (int)rFrames, cEv, &cCl, cf, cFrames); if (FAILED(hr)) logf("capture open hr=0x%08lX", (unsigned long)hr); }
-        if (SUCCEEDED(hr)) hr = rCl->GetService(IID_PPV_ARGS(&rr));
-        if (SUCCEEDED(hr)) hr = cCl->GetService(IID_PPV_ARGS(&cc));
+        if (FAILED(hr) && !quiet) logf("render open hr=0x%08lX", (unsigned long)hr);
+        if (SUCCEEDED(hr)) { hr = openExclusive(cDev, sr, (int)s.rFrames, cEv, &s.cCl, s.cf, s.cFrames); if (FAILED(hr) && !quiet) logf("capture open hr=0x%08lX", (unsigned long)hr); }
+        if (SUCCEEDED(hr)) hr = s.rCl->GetService(IID_PPV_ARGS(&s.rr));
+        if (SUCCEEDED(hr)) hr = s.cCl->GetService(IID_PPV_ARGS(&s.cc));
         if (SUCCEEDED(hr)) logf("devices: render %d ch %d-bit %u frames | capture %d ch %d-bit %u frames",
-                                rf.ch, rf.bytes * 8, rFrames, cf.ch, cf.bytes * 8, cFrames);
-        devFrames_ = rFrames;
+                                s.rf.ch, s.rf.bytes * 8, s.rFrames, s.cf.ch, s.cf.bytes * 8, s.cFrames);
+        else s.release();
+        if (rDev) rDev->Release(); if (cDev) cDev->Release();
+        return hr;
+    }
+
+    // When the ASIO buffer equals the device period, the host output of a block can go straight into
+    // the device buffer of the same period; otherwise one ASIO buffer of slack is needed.
+    void setDeviceFrames(UINT32 frames) {
+        devFrames_ = frames;
+        outPrime_ = (cfg_.lowLatency && bufSize_ == (long)frames) ? 0 : bufSize_;
+    }
+
+    // If Windows uses the UMC22 as default output, move it to the loopback device to free the UMC22
+    void moveDefaultOff() {
+        if (!cfg_.autoDefault || loopId_.empty()) return;
+        if (lower(getDefaultRender()) == lower(renderId_) && setDefaultRender(loopId_)) {
+            switchedDefault_ = true;
+            logf("Windows default output -> loopback device (restored on close)");
+            Sleep(150); // give apps time to migrate their streams
+        }
+    }
+
+    // Called every ~0.5 s while the UMC22 is missing. Returns true once it is open again.
+    bool tryReconnect(IMMDeviceEnumerator* en, HANDLE rEv, HANDLE cEv, Streams& s, HRESULT& lastHr, ULONGLONG& seenAt) {
+        for (int i = 0; i < 5 && running_; i++) Sleep(100);
+        if (!running_) return false;
+        std::wstring n1, n2;
+        std::wstring r = findEndpoint(en, eRender, cfg_.render, &n1);
+        std::wstring c = findEndpoint(en, eCapture, cfg_.capture, &n2);
+        if (r.empty() || c.empty()) { seenAt = 0; return false; }
+        // Right after it appears, Windows is still setting the UMC22 up and restarts its input once:
+        // a stream opened in that window stops delivering audio. Let it settle first.
+        if (!seenAt) { seenAt = GetTickCount64(); logf("UMC22 is back, letting Windows set it up"); }
+        if (GetTickCount64() - seenAt < 1500) return false;
+        // the IDs can change if it was plugged into another USB port
+        renderId_ = r; captureId_ = c;
+        if (loopId_ == renderId_) loopId_.clear();
+        moveDefaultOff(); // Windows may have made it the default output again when it came back
+        HRESULT hr = openStreams(en, rEv, cEv, s, true);
+        if (FAILED(hr)) {
+            if (hr != lastHr) logf("UMC22 is back but cannot be opened yet hr=0x%08lX, retrying", (unsigned long)hr);
+            lastHr = hr;
+            return false;
+        }
+        bool periodChanged = s.rFrames != devFrames_;
+        setDeviceFrames(s.rFrames);
+        logf("UMC22 reconnected: render -> %ls", n1.c_str());
+        if (periodChanged) requestReset("device period changed after reconnecting");
+        return true;
+    }
+
+    void engineThread(HANDLE opened) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        IMMDeviceEnumerator* en = nullptr;
+        HANDLE rEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE cEv = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        Streams s;
+
+        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en));
+        if (SUCCEEDED(hr)) hr = openStreams(en, rEv, cEv, s, false);
+        setDeviceFrames(s.rFrames);
         openResult_ = hr;
         SetEvent(opened);
 
@@ -672,13 +765,22 @@ private:
             for (;;) {
                 WaitForSingleObject(startEv_, INFINITE);
                 if (quit_) break;
-                if (running_) runStream(rCl, cCl, rr, cc, rEv, cEv, rf, cf, rFrames);
+                ULONGLONG lostAt = 0, seenAt = 0; HRESULT lastHr = S_OK;
+                while (running_) {
+                    if (!s.open()) {
+                        // UMC22 unplugged: the host keeps the driver; we reopen it as soon as it is back
+                        if (!lostAt) { lostAt = GetTickCount64(); deviceLost_ = true; logf("UMC22 unavailable: waiting to reopen it"); }
+                        if (!tryReconnect(en, rEv, cEv, s, lastHr, seenAt)) continue;
+                        logf("audio resumed after %.1f s", (GetTickCount64() - lostAt) / 1000.0);
+                        lostAt = 0; seenAt = 0; lastHr = S_OK; deviceLost_ = false;
+                    }
+                    if (runStream(s, rEv, cEv)) break; // stopped by the host
+                    s.release();                       // device lost
+                }
                 SetEvent(stoppedEv_);
             }
         }
-        if (rr) rr->Release(); if (cc) cc->Release();
-        if (rCl) rCl->Release(); if (cCl) cCl->Release();
-        if (rDev) rDev->Release(); if (cDev) cDev->Release();
+        s.release();
         if (en) en->Release();
         CloseHandle(rEv); CloseHandle(cEv);
         CoUninitialize();
@@ -686,18 +788,21 @@ private:
 
     void processBlock() {
         const long N = bufSize_; const int idx = bufIdx_;
+        float pkL = 0, pkR = 0;
         for (long i = 0; i < N; i++) {
             float l = 0, r = 0; inF_.pop(l, r);
+            pkL = std::max(pkL, std::fabs(l)); pkR = std::max(pkR, std::fabs(r));
             if (inBuf_[0][idx]) inBuf_[0][idx][i] = f2i(l);
             if (inBuf_[1][idx]) inBuf_[1][idx][i] = f2i(r);
         }
+        pubMax(pkIn_[0], pkL); pubMax(pkIn_[1], pkR);
         LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f);
         stampNs_ = (uint64_t)((double)q.QuadPart * 1e9 / (double)f.QuadPart);
         cb_->bufferSwitch(idx, 1);
         samplePos_ += N;
         // If the host only sends the guitar on L (R missing or silent), copy it to R
         bool copyL = !outBuf_[1][idx] && outBuf_[0][idx];
-        if (cfg_.monoAuto && !copyL && outBuf_[0][idx] && outBuf_[1][idx]) {
+        if (liveMono_.load(std::memory_order_relaxed) && !copyL && outBuf_[0][idx] && outBuf_[1][idx]) {
             int32_t ml = 0, mr = 0;
             for (long i = 0; i < N; i++) { ml |= outBuf_[0][idx][i]; mr |= outBuf_[1][idx][i]; }
             // hysteresis: signal on R -> stereo immediately; signal on L with R silent for >1 s -> copy L to R
@@ -714,13 +819,18 @@ private:
         bufIdx_ ^= 1;
     }
 
-    void runStream(IAudioClient* rCl, IAudioClient* cCl, IAudioRenderClient* rr, IAudioCaptureClient* cc,
-                   HANDLE rEv, HANDLE cEv, const DevFmt& rf, const DevFmt& cf, UINT32 B) {
+    // Streams until the host stops (returns true) or the UMC22 disappears (returns false).
+    bool runStream(Streams& s, HANDLE rEv, HANDLE cEv) {
+        IAudioClient* rCl = s.rCl; IAudioClient* cCl = s.cCl;
+        IAudioRenderClient* rr = s.rr; IAudioCaptureClient* cc = s.cc;
+        const DevFmt& rf = s.rf; const DevFmt& cf = s.cf; const UINT32 B = s.rFrames;
+        bool lost = false;
         DWORD task = 0; HANDLE mm = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task);
         if (mm) AvSetMmThreadPriority(mm, AVRT_PRIORITY_CRITICAL);
         const long N = bufSize_;
         inF_.init(65536); outF_.init(65536); bufIdx_ = 0;
-        for (long i = 0; i < N; i++) outF_.push(0, 0);
+        const long prime = outPrime_;
+        for (long i = 0; i < prime; i++) outF_.push(0, 0);
         YtMix yt;
         const double dstRate = sampleRate_;
         Limiter lim; lim.init(dstRate, 150.0);
@@ -738,11 +848,19 @@ private:
         cCl->Start(); rCl->Start();
         unsigned underruns = 0; uint64_t capFrames = 0, rEvents = 0, dupFrames = 0; ULONGLONG t0 = GetTickCount64();
         uint64_t expectPos = 0; bool havePos = false;
+        ULONGLONG lastCap = t0;
         HANDLE evs[2] = { cEv, rEv };
 
         while (running_) {
             DWORD w = WaitForMultipleObjects(2, evs, FALSE, 500);
-            if (w == WAIT_TIMEOUT) { logf("timeout waiting for the UMC22"); continue; }
+            if (w == WAIT_TIMEOUT) {
+                // an unplugged device can simply stop signalling: ask WASAPI whether it is still there
+                UINT32 pad = 0;
+                HRESULT phr = rCl->GetCurrentPadding(&pad);
+                if (phr == AUDCLNT_E_DEVICE_INVALIDATED || FAILED(cCl->GetCurrentPadding(&pad))) { lost = true; logf("UMC22 stopped responding"); break; }
+                logf("timeout waiting for the UMC22");
+                continue;
+            }
             bool capSig = (w == WAIT_OBJECT_0), renSig = (w == WAIT_OBJECT_0 + 1);
             if (capSig && WaitForSingleObject(rEv, 0) == WAIT_OBJECT_0) renSig = true;
 
@@ -763,23 +881,37 @@ private:
                     inF_.push(l, r);
                 }
                 capFrames += fr - skip;
+                lastCap = GetTickCount64();
                 cc->ReleaseBuffer(fr);
             }
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("capture device invalidated"); break; }
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { lost = true; logf("capture device invalidated"); break; }
+            if (FAILED(hr)) { lost = true; logf("capture error hr=0x%08lX: reopening", (unsigned long)hr); break; }
             if (!renSig) continue;
             rEvents++;
+
+            // Watchdog: the input can stop delivering audio without any error (e.g. Windows restarted the
+            // device under us) while the output keeps running. Reopen both streams in that case.
+            ULONGLONG now = GetTickCount64();
+            if (now - t0 > 1000 && now - lastCap > 250) {
+                UINT32 pend = 0; HRESULT phr = cc->GetNextPacketSize(&pend);
+                if (FAILED(phr) || !pend) { lost = true; logf("input stopped delivering audio (hr=0x%08lX): reopening", (unsigned long)phr); break; }
+            }
 
             // 2) process ASIO blocks
             while (inF_.n >= (size_t)N && running_) processBlock();
 
             // 3) output + Windows audio mix
             hr = rr->GetBuffer(B, &p);
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { requestReset("render device invalidated"); break; }
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) { lost = true; logf("render device invalidated"); break; }
             if (FAILED(hr)) continue;
             bool ytOn = ytActive_.load(std::memory_order_acquire);
-            if (ytOn) yt.block(ytRing_, ytSrcRate_, dstRate, cfg_.ytLatencyMs);
-            const float vol = cfg_.ytVolume;
-            if (outF_.n < B) underruns++;
+            if (ytOn) yt.block(ytRing_, ytSrcRate_, dstRate, liveYtLat_.load(std::memory_order_relaxed));
+            const float vol = liveVol_.load(std::memory_order_relaxed);
+            float pkOL = 0, pkOR = 0, pkY = 0;
+            if (outF_.n < B) {
+                // the first render events can arrive before any input (start-up): not a real glitch
+                if (rEvents > 2) { underruns++; underrunsLive_++; if (underruns <= 5) logf("underrun at %.3f s (%zu of %u frames ready)", (GetTickCount64() - t0) / 1000.0, outF_.n, B); }
+            }
             const bool dith = !rf.flt && rf.bytes == 2;
             for (UINT32 i = 0; i < B; i++) {
                 float l = 0, r = 0; outF_.pop(l, r);
@@ -788,10 +920,12 @@ private:
                 if (ytOn) {
                     float yl, yr; yt.next(ytRing_, yl, yr); yl *= vol; yr *= vol;
                     pkYt = std::max(pkYt, std::max(std::fabs(yl), std::fabs(yr)));
+                    pkY = std::max(pkY, std::max(std::fabs(yl), std::fabs(yr)));
                     mt.yl += yl * yl; mt.yr += yr * yr; mt.ylr += yl * yr; mt.py = std::max(mt.py, std::max(std::fabs(yl), std::fabs(yr)));
                     l += yl; r += yr;
                 }
                 lim.process(l, r);
+                pkOL = std::max(pkOL, std::fabs(l)); pkOR = std::max(pkOR, std::fabs(r));
                 if (lim.g < 0.98f) { limFrames++; mt.lim++; }
                 mt.ol += l * l; mt.orr += r * r; mt.olr += l * r; mt.po = std::max(mt.po, std::max(std::fabs(l), std::fabs(r))); mt.n++;
                 if (dith) { l += dth.tpdf(1.0f / 32768.0f); r += dth.tpdf(1.0f / 32768.0f); }
@@ -801,7 +935,8 @@ private:
                 for (int c = 2; c < rf.ch; c++) wrS(o + c * rf.bytes, rf, 0);
             }
             rr->ReleaseBuffer(B, 0);
-            if (cfg_.debugMeter && GetTickCount64() - lastMeter >= 5000 && mt.n) {
+            pubMax(pkOut_[0], pkOL); pubMax(pkOut_[1], pkOR); pubMax(pkYt_, pkY);
+            if (liveMeter_.load(std::memory_order_relaxed) &&GetTickCount64() - lastMeter >= 5000 && mt.n) {
                 double n = (double)mt.n;
                 logf("meter: guitar RMS L %.1f R %.1f peak %.1f corr %.2f | loopback RMS L %.1f R %.1f peak %.1f corr %.2f | output RMS L %.1f R %.1f peak %.1f corr %.2f | limiter %.1f%% | mono %s",
                      dbf(std::sqrt(mt.gl / n)), dbf(std::sqrt(mt.gr / n)), dbf(mt.pg), corr(mt.gl, mt.gr, mt.glr),
@@ -811,7 +946,7 @@ private:
                 mt = Meter{}; lastMeter = GetTickCount64();
             }
             // cap latency if it builds up
-            if (outF_.n > (size_t)(N + 2 * B)) outF_.drop(outF_.n - (N + B));
+            if (outF_.n > (size_t)(prime + 2 * B)) outF_.drop(outF_.n - (prime + B));
         }
         rCl->Stop(); cCl->Stop(); rCl->Reset(); cCl->Reset();
         double secs = (GetTickCount64() - t0) / 1000.0;
@@ -820,6 +955,7 @@ private:
         logf("levels: guitar peak %.1f dBFS, loopback peak %.1f dBFS, limiter active %.1f%% of the time",
              db(pkGtr), db(pkYt), 100.0 * limFrames / std::max(1.0, secs * dstRate));
         if (mm) AvRevertMmThreadCharacteristics(mm);
+        return !lost;
     }
 
     void requestReset(const char* why) {
@@ -904,13 +1040,521 @@ private:
     std::atomic<bool> quit_{ false }, running_{ false }, engineReady_{ false };
     HRESULT openResult_ = E_FAIL;
     UINT32 devFrames_ = 0;
+    long outPrime_ = 0; // silence queued ahead of the host output (= extra output latency)
     Fifo inF_, outF_;
 
     std::thread ytThread_;
     std::atomic<bool> ytRun_{ false }, ytActive_{ false };
     Spsc ytRing_;
     double ytSrcRate_ = 48000.0;
+
+    // live settings (written by the control panel) and meters (read by it)
+    std::atomic<float> liveVol_{ 1.0f }, liveYtLat_{ 40.0f };
+    std::atomic<bool> liveMono_{ true }, liveMeter_{ false }, deviceLost_{ false };
+    std::atomic<unsigned> underrunsLive_{ 0 };
+    std::atomic<float> pkIn_[2]{}, pkOut_[2]{}, pkYt_{ 0.0f };
 };
+
+// ============================================================ Control panel
+// Native Win32 settings window. Opened by the host (ASIO controlPanel) or standalone with
+//   rundll32 umc22asio.dll,ControlPanel
+// It edits config.ini; live settings apply immediately, the rest via an ASIO reset request.
+struct DevEntry { std::wstring name, id; bool exclusive = true; };
+
+// "Allow applications to take exclusive control of this device" (Sound > device > Advanced).
+// Windows only writes this property when the box is unchecked (value 0).
+static const PROPERTYKEY PKEY_ExclusiveModeAllowed = { { 0xb3f8fa53, 0x0004, 0x438e, { 0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13, 0x9b, 0xfc } }, 3 };
+
+static void listEndpoints(EDataFlow flow, std::vector<DevEntry>& out) {
+    runMta([&] {
+        IMMDeviceEnumerator* en = nullptr; IMMDeviceCollection* col = nullptr;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en)))) return;
+        if (SUCCEEDED(en->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &col))) {
+            UINT n = 0; col->GetCount(&n);
+            for (UINT i = 0; i < n; i++) {
+                IMMDevice* d = nullptr; if (FAILED(col->Item(i, &d))) continue;
+                IPropertyStore* ps = nullptr; LPWSTR id = nullptr;
+                if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &ps))) {
+                    PROPVARIANT v; PropVariantInit(&v);
+                    if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR && SUCCEEDED(d->GetId(&id))) {
+                        DevEntry e{ v.pwszVal, id }; CoTaskMemFree(id);
+                        PROPVARIANT x; PropVariantInit(&x);
+                        if (SUCCEEDED(ps->GetValue(PKEY_ExclusiveModeAllowed, &x))) {
+                            if (x.vt == VT_UI4) e.exclusive = x.ulVal != 0;
+                            else if (x.vt == VT_BOOL) e.exclusive = x.boolVal != VARIANT_FALSE;
+                        }
+                        PropVariantClear(&x);
+                        out.push_back(e);
+                    }
+                    PropVariantClear(&v); ps->Release();
+                }
+                d->Release();
+            }
+            col->Release();
+        }
+        en->Release();
+    });
+}
+
+static void writeConfig(const Config& c) {
+    ensureConfig();
+    std::wstring p = configPath(); wchar_t b[64];
+    auto put = [&](const wchar_t* k, const std::wstring& v) { WritePrivateProfileStringW(L"driver", k, v.c_str(), p.c_str()); };
+    put(L"render", c.render); put(L"capture", c.capture); put(L"loopback", c.loopback);
+    swprintf_s(b, L"%.2f", c.ytVolume); put(L"ytVolume", b);
+    put(L"monoAuto", c.monoAuto ? L"1" : L"0");
+    swprintf_s(b, L"%.0f", c.ytLatencyMs); put(L"ytLatencyMs", b);
+    put(L"preferredBuffer", std::to_wstring(c.preferredBuffer));
+    put(L"autoDefault", c.autoDefault ? L"1" : L"0");
+    put(L"debugMeter", c.debugMeter ? L"1" : L"0");
+    put(L"lowLatency", c.lowLatency ? L"1" : L"0");
+}
+
+class Panel {
+public:
+    static void show(HWND owner, Driver* drv) {
+        // v6 common controls through the manifest embedded in this DLL (resource ID 2)
+        static HANDLE actCtx = [] {
+            ACTCTXW ac{ sizeof ac };
+            ac.dwFlags = ACTCTX_FLAG_HMODULE_VALID | ACTCTX_FLAG_RESOURCE_NAME_VALID;
+            ac.hModule = g_hInst; ac.lpResourceName = MAKEINTRESOURCEW(2);
+            return CreateActCtxW(&ac);
+        }();
+        ULONG_PTR cookie = 0;
+        bool act = actCtx != INVALID_HANDLE_VALUE && ActivateActCtx(actCtx, &cookie);
+        { Panel p(drv); p.run(owner); }
+        if (act) DeactivateActCtx(0, cookie);
+    }
+
+private:
+    enum {
+        ID_RENDER = 101, ID_CAPTURE, ID_LOOP, ID_BUF, ID_LOWLAT, ID_VOL, ID_VOLTXT, ID_YTLAT, ID_MONO, ID_AUTODEF,
+        ID_METER, ID_STATUS, ID_M_IN, ID_M_OUT, ID_M_YT, ID_OPENLOG, ID_OPENCFG, ID_APPLY, ID_CHECKS, ID_SOUNDCPL,
+        ID_HELP = 300 // help "?" icons: ID_HELP, ID_HELP + 1...
+    };
+    struct CheckItem { int level; std::wstring text; }; // level: 0 ok, 1 warning, 2 problem
+    Driver* drv_; HWND hwnd_ = nullptr, tip_ = nullptr; HFONT font_ = nullptr, bold_ = nullptr; int dpi_ = 96;
+    Config cfg_, orig_;
+    std::vector<DevEntry> ren_, cap_;
+    std::vector<CheckItem> checks_;
+    bool done_ = false, pendingReset_ = false;
+    int helpCount_ = 0, ticks_ = 0;
+    float dIn_[2]{ -90, -90 }, dOut_[2]{ -90, -90 }, dYt_ = -90;
+    std::wstring lastStatus_;
+
+    explicit Panel(Driver* d) : drv_(d) {}
+    ~Panel() { if (font_) DeleteObject(font_); if (bold_) DeleteObject(bold_); }
+    int S(int v) const { return MulDiv(v, dpi_, 96); }
+    HWND ctl(int id) const { return GetDlgItem(hwnd_, id); }
+
+    HWND add(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id, bool bold = false) {
+        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), hwnd_,
+                                 (HMENU)(INT_PTR)id, g_hInst, nullptr);
+        SendMessageW(c, WM_SETFONT, (WPARAM)(bold ? bold_ : font_), FALSE);
+        return c;
+    }
+    void label(const wchar_t* t, int x, int y, int w, bool bold = false) { add(L"STATIC", t, SS_LEFT | SS_NOPREFIX, x, y, w, 18, -1, bold); }
+    HWND combo(int id, int x, int y, int w) { return add(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, x, y, w, 300, id); }
+    void check(int id, const wchar_t* t, int x, int y, int w, bool on) {
+        add(WC_BUTTONW, t, BS_AUTOCHECKBOX | WS_TABSTOP, x, y, w, 20, id);
+        SendMessageW(ctl(id), BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    int addItem(int id, const std::wstring& t, LPARAM data) {
+        int i = (int)SendMessageW(ctl(id), CB_ADDSTRING, 0, (LPARAM)t.c_str());
+        SendMessageW(ctl(id), CB_SETITEMDATA, i, data); return i;
+    }
+    static bool matches(const std::wstring& name, const std::wstring& needle) {
+        return !needle.empty() && lower(name).find(lower(needle)) != std::wstring::npos;
+    }
+
+    // device list; data = index in 'list', -1 = disabled, -2 = configured but not connected
+    void fillDevices(int id, const std::vector<DevEntry>& list, const std::wstring& value, bool allowNone) {
+        int sel = -1;
+        if (allowNone) { int i = addItem(id, L"(disabled)", -1); if (value.empty()) sel = i; }
+        for (size_t k = 0; k < list.size(); k++) {
+            int i = addItem(id, list[k].name, (LPARAM)k);
+            if (sel < 0 && matches(list[k].name, value)) sel = i;
+        }
+        if (sel < 0 && !value.empty()) sel = addItem(id, value + L"  (not connected)", -2);
+        SendMessageW(ctl(id), CB_SETCURSEL, sel < 0 ? 0 : sel, 0);
+    }
+    // keeps the configured substring if it still selects the chosen device (e.g. "USB Audio CODEC"
+    // survives the "2- " prefix Windows adds when the UMC22 moves to another USB port)
+    std::wstring pickedDevice(int id, const std::vector<DevEntry>& list, const std::wstring& current) {
+        int i = (int)SendMessageW(ctl(id), CB_GETCURSEL, 0, 0);
+        LPARAM k = SendMessageW(ctl(id), CB_GETITEMDATA, i, 0);
+        if (k == -1) return L"";
+        if (k < 0 || (size_t)k >= list.size()) return current;
+        return matches(list[k].name, current) ? current : list[k].name;
+    }
+    // round "?" icon at (x, y) that shows 'text' on hover
+    void help(int x, int y, const wchar_t* text) {
+        HWND h = add(L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, x, y, 18, 18, ID_HELP + helpCount_++);
+        TTTOOLINFOW ti{ sizeof ti };
+        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS; ti.hwnd = hwnd_; ti.uId = (UINT_PTR)h; ti.lpszText = (LPWSTR)text;
+        SendMessageW(tip_, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    }
+
+    // what the driver needs to work, re-evaluated every 2 s while the window is open
+    std::vector<CheckItem> evaluate() {
+        std::vector<DevEntry> ren, cap; listEndpoints(eRender, ren); listEndpoints(eCapture, cap);
+        auto find = [](const std::vector<DevEntry>& l, const std::wstring& n) -> const DevEntry* {
+            for (auto& e : l) if (matches(e.name, n)) return &e;
+            return nullptr;
+        };
+        const DevEntry* r = find(ren, cfg_.render); const DevEntry* c = find(cap, cfg_.capture);
+        const DevEntry* lb = cfg_.loopback.empty() ? nullptr : find(ren, cfg_.loopback);
+        std::vector<CheckItem> v;
+        if (r) v.push_back({ 0, L"Output connected: " + r->name });
+        else v.push_back({ 2, L"Output not found: plug in the UMC22 or pick it above" });
+        if (c) v.push_back({ 0, L"Input connected: " + c->name });
+        else v.push_back({ 2, L"Input not found: plug in the UMC22 or pick it above" });
+        if (r || c) {
+            bool ok = (!r || r->exclusive) && (!c || c->exclusive);
+            if (ok) v.push_back({ 0, L"Exclusive mode allowed on the UMC22" });
+            else v.push_back({ 2, std::wstring(L"Exclusive mode disabled on the ") + (r && !r->exclusive ? (c && !c->exclusive ? L"output and input" : L"output") : L"input") +
+                                  L": Sound settings > UMC22 > Properties > Advanced" });
+        }
+        if (cfg_.loopback.empty()) v.push_back({ 1, L"Windows audio mixing is disabled" });
+        else if (!lb) v.push_back({ 2, L"Windows audio device not found: pick another one above" });
+        else if (r && lb->id == r->id) v.push_back({ 2, L"The Windows audio device must not be the UMC22 itself" });
+        else v.push_back({ 0, L"Windows audio mixed from: " + lb->name });
+        // registration: which DLL do ASIO hosts load?
+        wchar_t reg[MAX_PATH] = L"", self[MAX_PATH] = L""; DWORD sz = sizeof reg;
+        GetModuleFileNameW(g_hInst, self, MAX_PATH);
+        std::wstring key = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr + L"\\InprocServer32";
+        bool registered = RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), nullptr, RRF_RT_REG_SZ, nullptr, reg, &sz) == ERROR_SUCCESS &&
+                          RegGetValueW(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\ASIO\\") + kDriverNameW).c_str(), L"CLSID", RRF_RT_REG_SZ, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+        if (!registered) v.push_back({ 2, L"Driver not registered: run the installer (or install.bat)" });
+        else if (_wcsicmp(reg, self) != 0) v.push_back({ 1, std::wstring(L"Hosts load the driver from another folder: ") + reg });
+        else v.push_back({ 0, L"Driver registered for ASIO hosts" });
+        return v;
+    }
+    void refreshChecks() {
+        auto v = evaluate();
+        bool same = v.size() == checks_.size();
+        for (size_t i = 0; same && i < v.size(); i++) same = v[i].level == checks_[i].level && v[i].text == checks_[i].text;
+        if (same) return;
+        checks_ = std::move(v);
+        InvalidateRect(ctl(ID_CHECKS), nullptr, TRUE);
+    }
+
+    LPARAM comboData(int id) { return SendMessageW(ctl(id), CB_GETITEMDATA, SendMessageW(ctl(id), CB_GETCURSEL, 0, 0), 0); }
+    bool checked(int id) { return SendMessageW(ctl(id), BM_GETCHECK, 0, 0) == BST_CHECKED; }
+    int volume() { return (int)SendMessageW(ctl(ID_VOL), TBM_GETPOS, 0, 0); }
+
+    void build() {
+        const int L = 16, X = 180, W = 324, H = 514; // H = column of the "?" icons
+        tip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                               0, 0, 0, 0, hwnd_, nullptr, g_hInst, nullptr);
+        SendMessageW(tip_, TTM_SETMAXTIPWIDTH, 0, S(340));
+        SendMessageW(tip_, TTM_SETDELAYTIME, TTDT_INITIAL, 150);
+        SendMessageW(tip_, TTM_SETDELAYTIME, TTDT_AUTOPOP, 30000);
+
+        label(L"Devices", L, 12, 200, true);
+        label(L"UMC22 output", L, 39, 160);       combo(ID_RENDER, X, 35, W);
+        help(H, 37, L"The UMC22 output, opened in exclusive mode. Your guitar and the Windows audio are mixed here: "
+                    L"headphones and the monitor outputs.");
+        label(L"UMC22 input", L, 69, 160);        combo(ID_CAPTURE, X, 65, W);
+        help(H, 67, L"The UMC22 input. Choose In 1 or In 2 (where your guitar is plugged in) in your host.");
+        label(L"Windows audio from", L, 99, 160); combo(ID_LOOP, X, 95, W);
+        help(H, 97, L"While the driver runs, Windows plays to this device and the driver mixes what it plays into the "
+                    L"UMC22 output, so YouTube, games and system sounds reach your headphones.\n\n"
+                    L"The onboard audio works: nothing needs to be plugged into it. (disabled) = no Windows audio on the UMC22.");
+        fillDevices(ID_RENDER, ren_, cfg_.render, false);
+        fillDevices(ID_CAPTURE, cap_, cfg_.capture, false);
+        fillDevices(ID_LOOP, ren_, cfg_.loopback, true);
+
+        label(L"Audio", L, 136, 200, true);
+        label(L"Buffer size", L, 163, 160); combo(ID_BUF, X, 159, 190);
+        std::vector<long> sizes = { 32, 48, 64, 96, 128, 144, 192, 256, 288, 384, 512, 768, 1024, 2048 };
+        if (std::find(sizes.begin(), sizes.end(), cfg_.preferredBuffer) == sizes.end()) { sizes.push_back(cfg_.preferredBuffer); std::sort(sizes.begin(), sizes.end()); }
+        for (long s : sizes) {
+            wchar_t t[64]; swprintf_s(t, L"%ld samples  (%.1f ms)", s, s * 1000.0 / 48000.0);
+            int i = addItem(ID_BUF, t, s);
+            if (s == cfg_.preferredBuffer) SendMessageW(ctl(ID_BUF), CB_SETCURSEL, i, 0);
+        }
+        help(H, 161, L"Buffer size the driver suggests to the host. 144 samples = 3 ms, the UMC22 minimum at 48 kHz.\n\n"
+                     L"Larger buffers add latency but are safer on slow PCs. Your host may use its own setting.");
+        check(ID_LOWLAT, L"Low latency output (one buffer less output latency)", X, 189, W, cfg_.lowLatency);
+        help(H, 190, L"The driver runs the UMC22 at the host buffer size, so the host output can go straight to the "
+                     L"device without an extra buffer: one buffer less output latency (3 ms at 144 samples).\n\n"
+                     L"Turn it off if you hear clicks. If the UMC22 cannot run at the host buffer size, the extra "
+                     L"buffer is used anyway.");
+
+        label(L"Windows audio volume", L, 220, 160);
+        add(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, X - 4, 216, 260, 26, ID_VOL);
+        SendMessageW(ctl(ID_VOL), TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+        SendMessageW(ctl(ID_VOL), TBM_SETPAGESIZE, 0, 10);
+        SendMessageW(ctl(ID_VOL), TBM_SETPOS, TRUE, (LPARAM)std::lround(cfg_.ytVolume * 100.0f));
+        add(L"STATIC", L"", SS_RIGHT, X + 262, 220, 62, 18, ID_VOLTXT);
+        updateVolText();
+        help(H, 219, L"Volume of the Windows audio (YouTube, games...) in the UMC22 output, relative to your guitar. "
+                     L"Applied immediately while you move it.");
+
+        label(L"Windows audio buffer", L, 253, 160); combo(ID_YTLAT, X, 249, 190);
+        std::vector<int> lats = { 20, 30, 40, 60, 80, 100, 150, 200 };
+        int curLat = (int)std::lround(cfg_.ytLatencyMs);
+        if (std::find(lats.begin(), lats.end(), curLat) == lats.end()) { lats.push_back(curLat); std::sort(lats.begin(), lats.end()); }
+        for (int v : lats) {
+            int i = addItem(ID_YTLAT, std::to_wstring(v) + L" ms" + (v == 40 ? L"  (default)" : L""), v);
+            if (v == curLat) SendMessageW(ctl(ID_YTLAT), CB_SETCURSEL, i, 0);
+        }
+        help(H, 251, L"Safety margin for the Windows audio. Raise it (60-80 ms) if YouTube drops out or crackles. "
+                     L"It does not affect the latency of your guitar.");
+        check(ID_MONO, L"Copy a mono guitar on the left channel to the right", X, 280, W, cfg_.monoAuto);
+        help(H, 281, L"Many amp sims send the guitar only on the left output. When the right channel stays silent for "
+                     L"1 second, the left one is copied to it so you hear it on both sides.");
+        check(ID_AUTODEF, L"Move Windows sounds off the UMC22 while in use", X, 304, W, cfg_.autoDefault);
+        help(H, 305, L"Apps playing to the UMC22 would block exclusive mode. While the driver runs, the Windows default "
+                     L"output is moved to the Windows audio device above, and moved back to the UMC22 when it stops.");
+        check(ID_METER, L"Write levels to log.txt every 5 s (diagnostics)", X, 328, W, cfg_.debugMeter);
+        help(H, 329, L"Writes guitar, Windows audio and output levels, stereo correlation and limiter activity to "
+                     L"log.txt every 5 seconds. Only useful to diagnose a problem.");
+
+        label(L"System check", L, 366, 200, true);
+        add(WC_BUTTONW, L"Sound settings", BS_PUSHBUTTON | WS_TABSTOP, X + 214, 361, 110, 26, ID_SOUNDCPL);
+        help(H, 365, L"What the driver needs to work, checked every 2 seconds.\n\n"
+                     L"Sound settings opens the classic Windows sound panel, where exclusive mode is allowed: "
+                     L"select the UMC22 > Properties > Advanced.");
+        add(L"STATIC", L"", SS_OWNERDRAW, L, 392, 498, 5 * 22, ID_CHECKS);
+        checks_ = evaluate();
+
+        const int Y = 516; // status
+        label(L"Status", L, Y, 200, true);
+        add(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, L, Y + 24, 488, 36, ID_STATUS);
+        if (drv_) { // level meters only make sense while a host has the driver open
+            label(L"Input", L, Y + 68, 70);   add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 69, 414, 16, ID_M_IN);
+            label(L"Output", L, Y + 94, 70);  add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 95, 414, 16, ID_M_OUT);
+            label(L"Windows", L, Y + 120, 70); add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 124, 414, 7, ID_M_YT);
+            help(H, Y + 68, L"Peak levels while the host runs. Input = what the UMC22 receives (your guitar), "
+                            L"Output = everything sent to the UMC22, Windows = the Windows audio mixed in.\n\n"
+                            L"Ticks every 12 dB. Red = closer than 3 dB to clipping.");
+        }
+
+        const int B = drv_ ? Y + 160 : Y + 76; // buttons
+        add(WC_BUTTONW, L"Open log", BS_PUSHBUTTON | WS_TABSTOP, L, B, 84, 28, ID_OPENLOG);
+        add(WC_BUTTONW, L"Edit config.ini", BS_PUSHBUTTON | WS_TABSTOP, L + 90, B, 110, 28, ID_OPENCFG);
+        add(WC_BUTTONW, L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 252, B, 80, 28, IDOK);
+        add(WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 338, B, 80, 28, IDCANCEL);
+        add(WC_BUTTONW, L"Apply", BS_PUSHBUTTON | WS_TABSTOP, 424, B, 80, 28, ID_APPLY);
+        updateStatus();
+    }
+    int clientHeight() const { return (drv_ ? 516 + 160 : 516 + 76) + 28 + 14; }
+
+    static void fillCircle(HDC dc, int x, int y, int d, COLORREF c) {
+        HBRUSH b = CreateSolidBrush(c); HPEN p = CreatePen(PS_SOLID, 1, c);
+        HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
+        Ellipse(dc, x, y, x + d, y + d);
+        SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(p);
+    }
+    void glyph(HDC dc, RECT r, const wchar_t* t) {
+        HGDIOBJ of = SelectObject(dc, bold_); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+        DrawTextW(dc, t, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, of);
+    }
+    void drawHelp(const DRAWITEMSTRUCT* di) {
+        RECT rc = di->rcItem;
+        FillRect(di->hDC, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        fillCircle(di->hDC, rc.left, rc.top, rc.right - rc.left, RGB(0, 103, 192));
+        glyph(di->hDC, rc, L"?");
+    }
+    void drawChecks(const DRAWITEMSTRUCT* di) {
+        HDC dc = di->hDC; RECT rc = di->rcItem;
+        FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+        static const COLORREF col[] = { RGB(46, 160, 67), RGB(219, 154, 4), RGB(207, 34, 46) };
+        static const wchar_t* sym[] = { L"\x2713", L"!", L"\x00D7" }; // check mark, !, multiplication sign
+        int line = S(22), d = S(16);
+        HGDIOBJ of = SelectObject(dc, font_);
+        for (size_t i = 0; i < checks_.size(); i++) {
+            int y = rc.top + (int)i * line;
+            fillCircle(dc, rc.left, y + (line - d) / 2, d, col[checks_[i].level]);
+            glyph(dc, RECT{ rc.left, y + (line - d) / 2, rc.left + d, y + (line - d) / 2 + d }, sym[checks_[i].level]);
+            SelectObject(dc, font_); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+            RECT t{ rc.left + d + S(8), y, rc.right, y + line };
+            DrawTextW(dc, checks_[i].text.c_str(), -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+        SelectObject(dc, of);
+    }
+
+    void updateVolText() {
+        wchar_t t[16]; swprintf_s(t, L"%d %%", volume());
+        SetWindowTextW(ctl(ID_VOLTXT), t);
+    }
+
+    void updateStatus() {
+        std::wstring s;
+        if (!drv_) {
+            s = L"Not opened by an ASIO host. Changes apply the next time a host opens the driver.";
+        } else {
+            Driver::Live l; drv_->live(l);
+            wchar_t t[256];
+            if (!l.ready) s = L"Driver loaded, audio not started. Changes apply when the host starts it.";
+            else if (l.lost) s = L"UMC22 disconnected: waiting for it to come back. Audio resumes automatically.";
+            else {
+                swprintf_s(t, L"%s  |  %ld samples @ %.0f Hz\nLatency: in %.1f ms / out %.1f ms  |  underruns since start: %u",
+                           l.running ? L"Running" : L"Ready (stopped)", l.buf, l.sr,
+                           l.dev * 1000.0 / l.sr, (l.dev + l.prime) * 1000.0 / l.sr, l.underruns);
+                s = t;
+            }
+            auto db = [](float v) { return v > 1e-5f ? 20.0f * std::log10(v) : -90.0f; };
+            auto fall = [&](float& d, float v) { d = std::max(db(v), d - 1.5f); };
+            for (int c = 0; c < 2; c++) { fall(dIn_[c], l.in[c]); fall(dOut_[c], l.out[c]); }
+            fall(dYt_, l.yt);
+        }
+        if (s != lastStatus_) { lastStatus_ = s; SetWindowTextW(ctl(ID_STATUS), s.c_str()); }
+        if (drv_) for (int id : { ID_M_IN, ID_M_OUT, ID_M_YT }) InvalidateRect(ctl(id), nullptr, FALSE); // never NULL: that repaints the whole desktop
+    }
+
+    void drawMeter(const DRAWITEMSTRUCT* di) {
+        RECT rc = di->rcItem; HDC dc = di->hDC;
+        const float* v = di->CtlID == ID_M_IN ? dIn_ : di->CtlID == ID_M_OUT ? dOut_ : &dYt_;
+        int bars = di->CtlID == ID_M_YT ? 1 : 2;
+        HBRUSH bg = CreateSolidBrush(RGB(48, 48, 48)); FillRect(dc, &rc, bg); DeleteObject(bg);
+        int w = rc.right - rc.left, gap = bars > 1 ? S(2) : 0, h = (rc.bottom - rc.top - gap) / bars;
+        auto xAt = [&](float db) { return rc.left + (int)(w * (std::clamp(db, -60.0f, 0.0f) + 60.0f) / 60.0f); };
+        struct { float from, to; COLORREF c; } zones[] = { { -60, -12, RGB(64, 192, 96) }, { -12, -3, RGB(230, 200, 60) }, { -3, 0, RGB(230, 70, 60) } };
+        for (int b = 0; b < bars; b++) {
+            int top = rc.top + b * (h + gap);
+            for (auto& z : zones) {
+                if (v[b] <= z.from) break;
+                RECT r{ xAt(z.from), top, xAt(std::min(v[b], z.to)), top + h };
+                HBRUSH br = CreateSolidBrush(z.c); FillRect(dc, &r, br); DeleteObject(br);
+            }
+        }
+        // ticks every 12 dB
+        HBRUSH tk = CreateSolidBrush(RGB(110, 110, 110));
+        for (int db = -48; db < 0; db += 12) { RECT r{ xAt((float)db), rc.top, xAt((float)db) + 1, rc.bottom }; FillRect(dc, &r, tk); }
+        DeleteObject(tk);
+    }
+
+    Config collect() {
+        Config n = cfg_;
+        n.render = pickedDevice(ID_RENDER, ren_, cfg_.render);
+        n.capture = pickedDevice(ID_CAPTURE, cap_, cfg_.capture);
+        n.loopback = pickedDevice(ID_LOOP, ren_, cfg_.loopback);
+        n.preferredBuffer = (long)comboData(ID_BUF);
+        n.lowLatency = checked(ID_LOWLAT);
+        n.ytVolume = volume() / 100.0f;
+        n.ytLatencyMs = (float)comboData(ID_YTLAT);
+        n.monoAuto = checked(ID_MONO);
+        n.autoDefault = checked(ID_AUTODEF);
+        n.debugMeter = checked(ID_METER);
+        return n;
+    }
+    void apply() {
+        Config n = collect();
+        bool reopen = n.render != cfg_.render || n.capture != cfg_.capture || n.loopback != cfg_.loopback ||
+                      n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency || n.autoDefault != cfg_.autoDefault;
+        writeConfig(n);
+        if (drv_) drv_->applyLive(n);
+        if (reopen) pendingReset_ = true;
+        cfg_ = n;
+        logf("control panel: settings saved%s", reopen ? " (driver reset requested)" : "");
+    }
+    void close(bool ok) {
+        if (ok) apply();
+        else if (drv_) drv_->applyLive(cfg_); // undo the live volume preview
+        done_ = true;
+    }
+
+    static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM lp) {
+        Panel* p = (Panel*)GetWindowLongPtrW(h, GWLP_USERDATA);
+        if (m == WM_NCCREATE) { p = (Panel*)((CREATESTRUCTW*)lp)->lpCreateParams; SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)p); p->hwnd_ = h; }
+        if (!p) return DefWindowProcW(h, m, w, lp);
+        switch (m) {
+        case WM_COMMAND:
+            switch (LOWORD(w)) {
+            case IDOK: p->close(true); return 0;
+            case IDCANCEL: p->close(false); return 0;
+            case ID_APPLY: p->apply(); p->refreshChecks(); return 0;
+            case ID_SOUNDCPL: ShellExecuteW(h, L"open", L"control.exe", L"mmsys.cpl", nullptr, SW_SHOWNORMAL); return 0;
+            case ID_OPENCFG: ensureConfig(); ShellExecuteW(h, L"open", L"notepad.exe", configPath().c_str(), nullptr, SW_SHOWNORMAL); return 0;
+            case ID_OPENLOG: ShellExecuteW(h, L"open", L"notepad.exe", (appDir() + L"\\log.txt").c_str(), nullptr, SW_SHOWNORMAL); return 0;
+            }
+            break;
+        case WM_HSCROLL:
+            if ((HWND)lp == p->ctl(ID_VOL)) { p->updateVolText(); if (p->drv_) p->drv_->setLiveVolume(p->volume() / 100.0f); }
+            return 0;
+        case WM_DRAWITEM: {
+            auto di = (const DRAWITEMSTRUCT*)lp;
+            if (di->CtlID >= ID_HELP) p->drawHelp(di);
+            else if (di->CtlID == ID_CHECKS) p->drawChecks(di);
+            else p->drawMeter(di);
+            return TRUE;
+        }
+        case WM_TIMER:
+            p->updateStatus();
+            if (++p->ticks_ % 40 == 0) p->refreshChecks(); // every 2 s
+            return 0;
+        case WM_CLOSE: p->close(false); return 0;
+        }
+        return DefWindowProcW(h, m, w, lp);
+    }
+
+    void run(HWND owner) {
+        listEndpoints(eRender, ren_); listEndpoints(eCapture, cap_);
+        cfg_ = orig_ = loadConfig();
+        INITCOMMONCONTROLSEX icc{ sizeof icc, ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
+        InitCommonControlsEx(&icc);
+        HDC sdc = GetDC(nullptr); dpi_ = GetDeviceCaps(sdc, LOGPIXELSY); ReleaseDC(nullptr, sdc);
+        NONCLIENTMETRICSW ncm{ sizeof ncm };
+        SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
+        font_ = CreateFontIndirectW(&ncm.lfMessageFont);
+        ncm.lfMessageFont.lfWeight = FW_SEMIBOLD; bold_ = CreateFontIndirectW(&ncm.lfMessageFont);
+
+        static ATOM cls = [] {
+            WNDCLASSEXW wc{ sizeof wc };
+            wc.lpfnWndProc = proc; wc.hInstance = g_hInst; wc.lpszClassName = L"UMC22AsioPanel";
+            wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512) /* IDC_ARROW */); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+            wc.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512) /* IDI_APPLICATION */);
+            return RegisterClassExW(&wc);
+        }();
+        if (!cls) return;
+        DWORD style = WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_CLIPCHILDREN;
+        RECT r{ 0, 0, S(548), S(clientHeight()) }; AdjustWindowRectEx(&r, style, FALSE, WS_EX_DLGMODALFRAME);
+        int ww = r.right - r.left, wh = r.bottom - r.top;
+        RECT area; if (!owner || !GetWindowRect(owner, &area)) SystemParametersInfoW(SPI_GETWORKAREA, 0, &area, 0);
+        int x = (area.left + area.right - ww) / 2, y = std::max<int>(area.top, (area.top + area.bottom - wh) / 2);
+        std::wstring title = std::wstring(kDriverNameW) + L" - Settings";
+        CreateWindowExW(WS_EX_DLGMODALFRAME | (owner ? 0 : WS_EX_APPWINDOW), L"UMC22AsioPanel", title.c_str(), style,
+                        x, y, ww, wh, owner, nullptr, g_hInst, this);
+        if (!hwnd_) return;
+        build();
+        SetTimer(hwnd_, 1, 50, nullptr);
+        if (owner) EnableWindow(owner, FALSE);
+        ShowWindow(hwnd_, SW_SHOW);
+        SetFocus(ctl(IDOK));
+        MSG msg; bool quit = false; WPARAM quitCode = 0;
+        while (!done_) {
+            BOOL got = GetMessageW(&msg, nullptr, 0, 0);
+            if (got <= 0) { quit = got == 0; quitCode = msg.wParam; break; }
+            if (!IsDialogMessageW(hwnd_, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        }
+        if (owner) EnableWindow(owner, TRUE);
+        KillTimer(hwnd_, 1);
+        DestroyWindow(hwnd_); hwnd_ = nullptr;
+        if (owner) SetForegroundWindow(owner);
+        if (quit) PostQuitMessage((int)quitCode); // the host is closing: hand WM_QUIT back to its loop
+        if (pendingReset_ && drv_ && drv_->canReset()) drv_->resetFromPanel();
+    }
+};
+
+ASIOError Driver::controlPanel() {
+    HWND owner = GetActiveWindow();
+    if (!owner) {
+        HWND fg = GetForegroundWindow(); DWORD pid = 0;
+        if (fg && GetWindowThreadProcessId(fg, &pid) && pid == GetCurrentProcessId()) owner = fg;
+    }
+    Panel::show(owner, this);
+    return ASE_OK;
+}
+
+// rundll32 umc22asio.dll,ControlPanel  -> settings window without an ASIO host
+extern "C" void CALLBACK ControlPanelW(HWND, HINSTANCE, LPWSTR, int) {
+    SetProcessDPIAware();
+    Panel::show(nullptr, nullptr);
+}
 
 // ============================================================ COM
 class Factory : public IClassFactory {

@@ -32,7 +32,10 @@ The Behringer UMC22 (USB Audio CODEC / PCM2902) has **no official ASIO driver**.
 
 ## Features
 
-- **WASAPI exclusive input and output** at the device's minimum period (144 frames @ 48 kHz = 3 ms), event-driven, with MMCSS "Pro Audio" scheduling.
+- **WASAPI exclusive input and output** at the device's minimum period (144 frames @ 48 kHz = 3 ms), event-driven, with MMCSS "Pro Audio" scheduling. **3 ms input / 3 ms output** reported to the host.
+- **Survives unplugging**: if the UMC22 is disconnected while playing, the driver waits for it and resumes audio by itself when it is plugged back in. No need to restart the host.
+- **Settings window** with device lists, buffer size, Windows audio volume (applied live), status and level meters. Open it from your host or from the Start menu.
+- **Installer** with Start menu shortcut and uninstaller, or a portable zip.
 - **Windows audio mixing**: browser, music players and system sounds are captured via WASAPI loopback and mixed into the UMC22 output (headphones and monitor outputs).
 - **Automatic output switching**: the Windows default output is moved off the UMC22 while the driver is open and restored when it closes.
 - **Clean summing**: cubic Hermite resampler with smoothed clock-drift correction, click-free fades, a −0.2 dBFS peak limiter and TPDF dither to 16-bit.
@@ -68,12 +71,11 @@ Windows 10 or 11, x64. A second Windows output device is used as the source for 
 
 ## Installation
 
-1. Download `umc22-asio-vX.Y.Z-win64.zip` from the [latest release](https://github.com/Tohzzicklao/umc22-asio/releases/latest).
-2. Extract it to a **permanent** folder (the driver is registered from that location).
-3. Close any ASIO application.
-4. Run **`install.bat`** and accept the administrator prompt.
+**Installer (recommended).** Download `umc22-asio-vX.Y.Z-setup.exe` from the [latest release](https://github.com/Tohzzicklao/umc22-asio/releases/latest), close any ASIO application and run it. It installs to `Program Files`, registers the driver and adds a **"Low Latency ASIO for UMC22 Settings"** shortcut to the Start menu. Uninstall it from *Settings → Apps*.
 
-To uninstall, run `install.bat /u`.
+**Portable zip.** Download `umc22-asio-vX.Y.Z-win64.zip`, extract it to a **permanent** folder (the driver is registered from that location), close any ASIO application and run **`install.bat`** (accept the administrator prompt). To uninstall, run `install.bat /u`.
+
+> Coming from the zip version? Run `install.bat /u` from the old folder first, then use the installer. Your settings in `%APPDATA%\UMC22ASIO` are kept.
 
 ## Quick start
 
@@ -96,11 +98,21 @@ To uninstall, run `install.bat /u`.
 
 > **Where you hear it:** the mix goes to the UMC22's stereo output, so it reaches **everything connected to the UMC22**: headphones and studio monitors or an amplifier on its line outputs. The onboard output used for loopback is only the *source* of the Windows audio: anything plugged into it plays Windows audio alone, without the guitar. The output device is set by `render` in `config.ini` (tested with the UMC22 only).
 
-**Typical latency** reported to the host at 48 kHz with a 144-sample buffer: **3.0 ms input / 6.0 ms output**, not counting USB and converter latency.
+**Typical latency** reported to the host at 48 kHz with a 144-sample buffer: **3.0 ms input / 3.0 ms output**, not counting USB and converter latency. The driver runs the UMC22 at the host buffer size, so the host output of each block goes straight into the device buffer of the same period (for example 5.3 / 5.3 ms at 256 samples). If the device cannot run at the host buffer size, one extra ASIO buffer is kept on the output to absorb the mismatch.
+
+**Unplugging.** If the UMC22 disappears while playing, the driver stops calling the host and checks every 0.5 s whether the device is back. When it is, the driver reopens it (even on a different USB port) and audio resumes; the host doesn't need to reload the driver.
 
 ## Configuration
 
-`%APPDATA%\UMC22ASIO\config.ini` is created on first use. Open it with the **Control Panel** button in your host's ASIO settings. Changes apply the next time the host opens the driver.
+Use the **settings window**: the **Control Panel** button in your host's ASIO settings, or the Start menu shortcut (or `rundll32 umc22asio.dll,ControlPanel`).
+
+<!-- TODO: docs/control-panel.png screenshot -->
+
+- The Windows audio volume, Windows audio buffer, mono guitar copy and diagnostics log apply **immediately**.
+- Devices, buffer size, low latency output and automatic output switching need the device to be reopened: when the window is closed with **OK**, the driver asks the host to reset it (most hosts do this automatically).
+- Device names are stored as a substring. If the configured name (e.g. `USB Audio CODEC`) still matches the selected device, it is kept, so it survives the `2-` prefix Windows adds when the interface moves to another USB port.
+
+Settings are stored in `%APPDATA%\UMC22ASIO\config.ini`, which can also be edited by hand:
 
 | Key | Default | Description |
 |---|---|---|
@@ -112,6 +124,7 @@ To uninstall, run `install.bat /u`.
 | `monoAuto` | `1` | Copy L→R if the host only sends the left channel |
 | `autoDefault` | `1` | Automatically switch/restore the Windows default output |
 | `debugMeter` | `0` | Log levels, phase correlation and limiter activity every 5 s |
+| `lowLatency` | `1` | No extra output buffer when the device runs at the ASIO buffer size (one buffer less output latency: −3 ms at 144). Set to `0` if you hear clicks |
 
 Log file: `%APPDATA%\UMC22ASIO\log.txt` (rotated to `log.old.txt` above 512 KB).
 
@@ -121,15 +134,16 @@ Log file: `%APPDATA%\UMC22ASIO\log.txt` (rotated to `log.old.txt` above 512 KB).
 |---|---|
 | "The UMC22 is in use by another app" | An app has the UMC22 open and doesn't follow the default device. Change its output in *Settings → Sound → Volume mixer* |
 | "Exclusive mode is disabled in the UMC22 properties" | *Sound settings → UMC22 → More sound settings → Advanced* → enable "Allow applications to take exclusive control" |
-| "UMC22 (USB Audio CODEC) not found" | Interface unplugged, or a different device name: adjust `render` / `capture` in `config.ini` |
+| "UMC22 (USB Audio CODEC) not found" | Interface unplugged, or a different device name: pick it in the settings window |
+| Audio stops when the UMC22 is unplugged | Expected: plug it back in and audio resumes by itself after about a second |
 | No YouTube / Windows audio | Make sure apps play to the `loopback` device and that `log.txt` shows `loopback active` |
 | Windows audio sounds hollow or vocals are weak | Disable *Audio enhancements* and *Spatial sound* on the loopback device. If it also happens without the driver, check the headphone plug: a TRRS headset plug in a TRS jack, or a half-inserted plug, cancels everything panned to the centre |
 | Windows audio drops out | Raise `ytLatencyMs` to 60–80 |
-| Guitar crackles | Increase the buffer size in your host (192, 256) |
+| Guitar crackles | Disable *Low latency output* in the settings window; if it persists, increase the buffer size in your host (192, 256) |
 
 ## Building from source
 
-Requires Visual Studio 2022 or later with **Desktop development with C++**.
+Requires Visual Studio 2022 or later with **Desktop development with C++**. The installer additionally needs [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`).
 
 ```bat
 git clone https://github.com/Tohzzicklao/umc22-asio.git
@@ -146,18 +160,19 @@ install.bat        :: copies to bin\ and registers the driver (admin)
 
 ```bat
 build.bat
-package.bat 1.2.0  :: creates dist\umc22-asio-v1.2.0-win64.zip
-gh release create v1.2.0 dist\umc22-asio-v1.2.0-win64.zip --title "v1.2.0" --notes-file CHANGELOG.md
+package.bat 1.2.0  :: creates dist\umc22-asio-v1.2.0-win64.zip and dist\umc22-asio-v1.2.0-setup.exe
+gh release create v1.2.0 dist\umc22-asio-v1.2.0-setup.exe dist\umc22-asio-v1.2.0-win64.zip --title "v1.2.0" --notes-file CHANGELOG.md
 ```
 
 ### Project layout
 
 ```
-umc22asio.cpp     Driver: ASIO interface, WASAPI engine, mixer, COM registration
+umc22asio.cpp     Driver: ASIO interface, WASAPI engine, mixer, settings window, COM registration
 umc22asio.def     DLL exports
 build.bat         Builds the driver and the tools (MSVC x64)
-install.bat       Registers / unregisters the driver
-package.bat       Creates the release zip
+install.bat       Registers / unregisters the driver (portable zip)
+package.bat       Creates the release zip and the installer
+installer/        Inno Setup script
 docs/             Diagrams used in this README
 tools/            Diagnostic utilities (see below)
 ```
@@ -167,7 +182,7 @@ tools/            Diagnostic utilities (see below)
 | Tool | Purpose |
 |---|---|
 | `probe` | Lists audio devices with their mix format, shared/exclusive periods and supported exclusive formats |
-| `testhost` | Minimal ASIO host: loads `umc22asio.dll` without registering it and counts callbacks for 3 s (`testhost.exe [buffer]`, run from the folder that contains the DLL) |
+| `testhost` | Minimal ASIO host: loads `umc22asio.dll` without registering it and counts callbacks (`testhost.exe [buffer] [seconds] [panel]`, run from the folder that contains the DLL; `panel` opens the settings window while audio runs) |
 | `phasetest` | Plays a mono test tone on the loopback device and measures L/R level and phase with synchronous detection, to find Windows effects that alter the stereo image. Set the endpoint ID at the top of the file |
 
 ## Limitations
