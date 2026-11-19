@@ -167,7 +167,15 @@ gh release create v1.2.0 dist\umc22-asio-v1.2.0-setup.exe dist\umc22-asio-v1.2.0
 ### Project layout
 
 ```
-umc22asio.cpp     Driver: ASIO interface, WASAPI engine, mixer, settings window, COM registration
+umc22asio.cpp     Entry point: includes, driver identity and the modules below (single translation unit)
+src/asio_abi.h    ASIO interface at the ABI level (no Steinberg SDK)
+src/config.h      Paths, log, config.ini, endpoint lookup
+src/wasapi.h      Sample formats and exclusive-mode WASAPI streams
+src/dsp.h         FIFOs, Windows audio resampler, limiter, dither
+src/default_output.h  Moving the Windows default output
+src/driver.h      The ASIO driver: engine, mixer, unplug recovery
+src/panel.h       Settings window
+src/com.h         COM factory, DLL entry points, registration
 umc22asio.def     DLL exports
 build.bat         Builds the driver and the tools (MSVC x64)
 install.bat       Registers / unregisters the driver (portable zip)
