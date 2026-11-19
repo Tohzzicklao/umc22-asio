@@ -78,7 +78,7 @@ public:
 private:
     enum {
         ID_RENDER = 101, ID_CAPTURE, ID_LOOP, ID_BUF, ID_LOWLAT, ID_VOL, ID_VOLTXT, ID_YTLAT, ID_MONO, ID_AUTODEF,
-        ID_METER, ID_STATUS, ID_M_IN, ID_M_OUT, ID_M_YT, ID_OPENLOG, ID_OPENCFG, ID_APPLY, ID_CHECKS, ID_SOUNDCPL,
+        ID_METER, ID_STATUS, ID_M_IN, ID_M_OUT, ID_M_YT, ID_OPENLOG, ID_OPENCFG, ID_APPLY, ID_CHECKS, ID_SOUNDCPL, ID_REPORT,
         ID_HELP = 300 // help "?" icons: ID_HELP, ID_HELP + 1...
     };
     struct CheckItem { int level; std::wstring text; }; // level: 0 ok, 1 warning, 2 problem
@@ -188,6 +188,69 @@ private:
         InvalidateRect(ctl(ID_CHECKS), nullptr, TRUE);
     }
 
+    // ---------------------------------------------------- "Report a problem"
+    static std::wstring windowsVersion() {
+        typedef LONG(WINAPI* RtlGetVersionFn)(OSVERSIONINFOW*);
+        OSVERSIONINFOW v{ sizeof v };
+        auto fn = (RtlGetVersionFn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+        if (!fn || fn(&v) != 0) return L"unknown";
+        wchar_t t[64]; swprintf_s(t, L"%lu.%lu build %lu", v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
+        return t;
+    }
+    // the report goes to a public issue: replace the user profile path, which contains the user name
+    static std::wstring anonymize(std::wstring s) {
+        wchar_t prof[MAX_PATH] = L"";
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", prof, MAX_PATH);
+        if (!n || n >= MAX_PATH) return s;
+        std::wstring lp = lower(prof), ls = lower(s);
+        for (size_t i = ls.find(lp); i != std::wstring::npos; i = ls.find(lp)) {
+            s.replace(i, lp.size(), L"%USERPROFILE%");
+            ls.replace(i, lp.size(), L"%userprofile%");
+        }
+        return s;
+    }
+    static std::string urlEncode(const std::wstring& w) {
+        int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        std::string u(n, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &u[0], n, nullptr, nullptr);
+        std::string o; char h[4];
+        for (unsigned char c : u) {
+            bool plain = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+            if (plain) o += (char)c; else { sprintf_s(h, "%%%02X", c); o += h; }
+        }
+        return o;
+    }
+    // Opens a new GitHub issue prefilled with the driver, Windows, settings and system check details,
+    // and the log folder with log.txt selected so it can be dragged into the issue.
+    void report() {
+        logf("control panel: problem report opened");
+        refreshChecks();
+        wchar_t exe[MAX_PATH] = L""; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const wchar_t* host = wcsrchr(exe, L'\\') ? wcsrchr(exe, L'\\') + 1 : exe;
+        std::wstring b, status = lastStatus_;
+        std::replace(status.begin(), status.end(), L'\n', L' ');
+        b += L"### What happened\n<!-- What did you do, what did you expect, and what happened instead? Does it happen every time? -->\n\n\n";
+        b += L"### Log\n<!-- Please drag log.txt here: its folder has just been opened for you. -->\n\n\n";
+        b += L"### System (filled in by the driver)\n";
+        wchar_t t[512];
+        swprintf_s(t, L"- Driver: %ld.%ld.%ld\n- Windows: %s\n- Host: %s\n",
+                   (kDriverVersion >> 16) & 0xff, (kDriverVersion >> 8) & 0xff, kDriverVersion & 0xff,
+                   windowsVersion().c_str(), drv_ ? host : L"(settings opened outside a host)");
+        b += t;
+        swprintf_s(t, L"- Settings: buffer %ld, lowLatency %d, ytLatencyMs %.0f, ytVolume %.2f, monoAuto %d, autoDefault %d\n",
+                   cfg_.preferredBuffer, (int)cfg_.lowLatency, cfg_.ytLatencyMs, cfg_.ytVolume, (int)cfg_.monoAuto, (int)cfg_.autoDefault);
+        b += t;
+        b += L"- Devices: render `" + cfg_.render + L"`, capture `" + cfg_.capture + L"`, loopback `" +
+             (cfg_.loopback.empty() ? std::wstring(L"(disabled)") : cfg_.loopback) + L"`\n";
+        b += L"- Status: " + status + L"\n\n### System check\n";
+        static const wchar_t* lv[] = { L"OK", L"Warning", L"Problem" };
+        for (auto& c : checks_) b += std::wstring(L"- ") + lv[c.level] + L": " + c.text + L"\n";
+        std::string url = std::string(kRepoUrl) + "/issues/new?body=" + urlEncode(anonymize(b));
+        ShellExecuteA(hwnd_, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        std::wstring args = L"/select,\"" + appDir() + L"\\log.txt\"";
+        ShellExecuteW(hwnd_, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+    }
+
     LPARAM comboData(int id) { return SendMessageW(ctl(id), CB_GETITEMDATA, SendMessageW(ctl(id), CB_GETCURSEL, 0, 0), 0); }
     bool checked(int id) { return SendMessageW(ctl(id), BM_GETCHECK, 0, 0) == BST_CHECKED; }
     int volume() { return (int)SendMessageW(ctl(ID_VOL), TBM_GETPOS, 0, 0); }
@@ -262,6 +325,7 @@ private:
 
         const int Y = 516; // status
         label(L"Status", L, Y, 200, true);
+        add(WC_BUTTONW, L"Report a problem...", BS_PUSHBUTTON | WS_TABSTOP, X + 194, Y - 5, 130, 26, ID_REPORT);
         add(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, L, Y + 24, 488, 36, ID_STATUS);
         if (drv_) { // level meters only make sense while a host has the driver open
             label(L"Input", L, Y + 68, 70);   add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 69, 414, 16, ID_M_IN);
@@ -405,6 +469,7 @@ private:
             case IDOK: p->close(true); return 0;
             case IDCANCEL: p->close(false); return 0;
             case ID_APPLY: p->apply(); p->refreshChecks(); return 0;
+            case ID_REPORT: p->report(); return 0;
             case ID_SOUNDCPL: ShellExecuteW(h, L"open", L"control.exe", L"mmsys.cpl", nullptr, SW_SHOWNORMAL); return 0;
             case ID_OPENCFG: ensureConfig(); ShellExecuteW(h, L"open", L"notepad.exe", configPath().c_str(), nullptr, SW_SHOWNORMAL); return 0;
             case ID_OPENLOG: ShellExecuteW(h, L"open", L"notepad.exe", (appDir() + L"\\log.txt").c_str(), nullptr, SW_SHOWNORMAL); return 0;

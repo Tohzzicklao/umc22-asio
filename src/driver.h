@@ -52,7 +52,7 @@ public:
         return 1;
     }
     void getDriverName(char* name) override { strcpy_s(name, 32, kDriverName); }
-    long getDriverVersion() override { return 0x010200; } // 1.2.0
+    long getDriverVersion() override { return kDriverVersion; }
     void getErrorMessage(char* s) override { strcpy_s(s, 124, err_); }
 
     ASIOError start() override {
