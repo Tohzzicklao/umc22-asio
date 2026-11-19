@@ -60,7 +60,7 @@ static const CLSID CLSID_UMC22 = { 0x6b3e2a71, 0x9c4d, 0x4f1e, { 0xb8, 0xa2, 0x5
 static const wchar_t* kClsidStr = L"{6B3E2A71-9C4D-4F1E-B8A2-5D7C0E91F3A4}";
 static const wchar_t* kDriverNameW = L"Low Latency ASIO for UMC22";
 static const char* kDriverName = "Low Latency ASIO for UMC22";
-static const long kDriverVersion = 0x010200;     // 1.2.0, reported to hosts and in problem reports
+static const long kDriverVersion = 0x010201;     // 1.2.1, reported to hosts and in problem reports
 static const char* kRepoUrl = "https://github.com/Tohzzicklao/umc22-asio";
 static const wchar_t* kLegacyNameW = L"UMC22 Low Latency"; // name used by v1.0.x, removed on (un)register
 

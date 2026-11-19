@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.1 — 2026-11-19
+
+- Settings window: **Report a problem...** button. It opens a new GitHub issue prefilled with the driver and Windows versions, the host, the settings, the status and the system check (user profile paths are replaced by `%USERPROFILE%`), and opens the log folder so `log.txt` can be attached.
+- Settings window: **Apply** stays disabled until a setting changes; OK without changes no longer rewrites `config.ini`.
+- Driver version reported to hosts: 1.2.1.
+
 ## v1.2.0 — 2026-11-19
 
 - **Lower output latency**: the host output goes straight into the UMC22 without an extra buffer, one buffer less output latency. At 144 samples the reported latency drops from 3 / 6 ms to **3 / 3 ms**. New `lowLatency` setting (on by default) to turn it off.
