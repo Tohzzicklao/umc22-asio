@@ -340,7 +340,7 @@ private:
         add(WC_BUTTONW, L"Edit config.ini", BS_PUSHBUTTON | WS_TABSTOP, L + 90, B, 110, 28, ID_OPENCFG);
         add(WC_BUTTONW, L"OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 252, B, 80, 28, IDOK);
         add(WC_BUTTONW, L"Cancel", BS_PUSHBUTTON | WS_TABSTOP, 338, B, 80, 28, IDCANCEL);
-        add(WC_BUTTONW, L"Apply", BS_PUSHBUTTON | WS_TABSTOP, 424, B, 80, 28, ID_APPLY);
+        add(WC_BUTTONW, L"Apply", BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED, 424, B, 80, 28, ID_APPLY);
         updateStatus();
     }
     int clientHeight() const { return (drv_ ? 516 + 160 : 516 + 76) + 28 + 14; }
@@ -445,7 +445,23 @@ private:
         n.debugMeter = checked(ID_METER);
         return n;
     }
+    // what is on screen differs from the saved settings (volume and buffer compared as shown: % and ms)
+    bool changed() {
+        Config n = collect();
+        return n.render != cfg_.render || n.capture != cfg_.capture || n.loopback != cfg_.loopback ||
+               n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency ||
+               std::lround(n.ytVolume * 100.0f) != std::lround(cfg_.ytVolume * 100.0f) ||
+               std::lround(n.ytLatencyMs) != std::lround(cfg_.ytLatencyMs) ||
+               n.monoAuto != cfg_.monoAuto || n.autoDefault != cfg_.autoDefault || n.debugMeter != cfg_.debugMeter;
+    }
+    void updateApply() {
+        bool on = changed();
+        HWND b = ctl(ID_APPLY);
+        if (!on && GetFocus() == b) SendMessageW(hwnd_, WM_NEXTDLGCTL, (WPARAM)ctl(IDOK), TRUE); // never keep focus on a disabled button
+        EnableWindow(b, on);
+    }
     void apply() {
+        if (!changed()) return;
         Config n = collect();
         bool reopen = n.render != cfg_.render || n.capture != cfg_.capture || n.loopback != cfg_.loopback ||
                       n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency || n.autoDefault != cfg_.autoDefault;
@@ -470,15 +486,17 @@ private:
             switch (LOWORD(w)) {
             case IDOK: p->close(true); return 0;
             case IDCANCEL: p->close(false); return 0;
-            case ID_APPLY: p->apply(); p->refreshChecks(); return 0;
+            case ID_APPLY: p->apply(); p->updateApply(); p->refreshChecks(); return 0;
             case ID_REPORT: p->report(); return 0;
             case ID_SOUNDCPL: ShellExecuteW(h, L"open", L"control.exe", L"mmsys.cpl", nullptr, SW_SHOWNORMAL); return 0;
             case ID_OPENCFG: ensureConfig(); ShellExecuteW(h, L"open", L"notepad.exe", configPath().c_str(), nullptr, SW_SHOWNORMAL); return 0;
             case ID_OPENLOG: ShellExecuteW(h, L"open", L"notepad.exe", (appDir() + L"\\log.txt").c_str(), nullptr, SW_SHOWNORMAL); return 0;
             }
+            // a setting was edited: combo selection or checkbox
+            if (HIWORD(w) == CBN_SELCHANGE || HIWORD(w) == BN_CLICKED) p->updateApply();
             break;
         case WM_HSCROLL:
-            if ((HWND)lp == p->ctl(ID_VOL)) { p->updateVolText(); if (p->drv_) p->drv_->setLiveVolume(p->volume() / 100.0f); }
+            if ((HWND)lp == p->ctl(ID_VOL)) { p->updateVolText(); if (p->drv_) p->drv_->setLiveVolume(p->volume() / 100.0f); p->updateApply(); }
             return 0;
         case WM_DRAWITEM: {
             auto di = (const DRAWITEMSTRUCT*)lp;
