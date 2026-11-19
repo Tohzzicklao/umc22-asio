@@ -106,7 +106,9 @@ Windows 10 or 11, x64. A second Windows output device is used as the source for 
 
 Use the **settings window**: the **Control Panel** button in your host's ASIO settings, or the Start menu shortcut (or `rundll32 umc22asio.dll,ControlPanel`).
 
-<!-- TODO: docs/control-panel.png screenshot -->
+<p align="center">
+  <img src="docs/control-panel.png" alt="Settings window: device lists, buffer size, low latency output, Windows audio volume and buffer, options with help, system check, status and level meters" width="520">
+</p>
 
 - The Windows audio volume, Windows audio buffer, mono guitar copy and diagnostics log apply **immediately**.
 - Devices, buffer size, low latency output and automatic output switching need the device to be reopened: when the window is closed with **OK**, the driver asks the host to reset it (most hosts do this automatically).

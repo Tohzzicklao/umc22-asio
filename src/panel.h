@@ -202,10 +202,7 @@ private:
 
         label(L"Devices", L, 12, 200, true);
         label(L"UMC22 output", L, 39, 160);       combo(ID_RENDER, X, 35, W);
-        help(H, 37, L"The UMC22 output, opened in exclusive mode. Your guitar and the Windows audio are mixed here: "
-                    L"headphones and the monitor outputs.");
         label(L"UMC22 input", L, 69, 160);        combo(ID_CAPTURE, X, 65, W);
-        help(H, 67, L"The UMC22 input. Choose In 1 or In 2 (where your guitar is plugged in) in your host.");
         label(L"Windows audio from", L, 99, 160); combo(ID_LOOP, X, 95, W);
         help(H, 97, L"While the driver runs, Windows plays to this device and the driver mixes what it plays into the "
                     L"UMC22 output, so YouTube, games and system sounds reach your headphones.\n\n"
@@ -223,8 +220,6 @@ private:
             int i = addItem(ID_BUF, t, s);
             if (s == cfg_.preferredBuffer) SendMessageW(ctl(ID_BUF), CB_SETCURSEL, i, 0);
         }
-        help(H, 161, L"Buffer size the driver suggests to the host. 144 samples = 3 ms, the UMC22 minimum at 48 kHz.\n\n"
-                     L"Larger buffers add latency but are safer on slow PCs. Your host may use its own setting.");
         check(ID_LOWLAT, L"Low latency output (one buffer less output latency)", X, 189, W, cfg_.lowLatency);
         help(H, 190, L"The driver runs the UMC22 at the host buffer size, so the host output can go straight to the "
                      L"device without an extra buffer: one buffer less output latency (3 ms at 144 samples).\n\n"
@@ -238,8 +233,6 @@ private:
         SendMessageW(ctl(ID_VOL), TBM_SETPOS, TRUE, (LPARAM)std::lround(cfg_.ytVolume * 100.0f));
         add(L"STATIC", L"", SS_RIGHT, X + 262, 220, 62, 18, ID_VOLTXT);
         updateVolText();
-        help(H, 219, L"Volume of the Windows audio (YouTube, games...) in the UMC22 output, relative to your guitar. "
-                     L"Applied immediately while you move it.");
 
         label(L"Windows audio buffer", L, 253, 160); combo(ID_YTLAT, X, 249, 190);
         std::vector<int> lats = { 20, 30, 40, 60, 80, 100, 150, 200 };
@@ -258,8 +251,6 @@ private:
         help(H, 305, L"Apps playing to the UMC22 would block exclusive mode. While the driver runs, the Windows default "
                      L"output is moved to the Windows audio device above, and moved back to the UMC22 when it stops.");
         check(ID_METER, L"Write levels to log.txt every 5 s (diagnostics)", X, 328, W, cfg_.debugMeter);
-        help(H, 329, L"Writes guitar, Windows audio and output levels, stereo correlation and limiter activity to "
-                     L"log.txt every 5 seconds. Only useful to diagnose a problem.");
 
         label(L"System check", L, 366, 200, true);
         add(WC_BUTTONW, L"Sound settings", BS_PUSHBUTTON | WS_TABSTOP, X + 214, 361, 110, 26, ID_SOUNDCPL);
@@ -276,9 +267,6 @@ private:
             label(L"Input", L, Y + 68, 70);   add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 69, 414, 16, ID_M_IN);
             label(L"Output", L, Y + 94, 70);  add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 95, 414, 16, ID_M_OUT);
             label(L"Windows", L, Y + 120, 70); add(L"STATIC", L"", SS_OWNERDRAW, 90, Y + 124, 414, 7, ID_M_YT);
-            help(H, Y + 68, L"Peak levels while the host runs. Input = what the UMC22 receives (your guitar), "
-                            L"Output = everything sent to the UMC22, Windows = the Windows audio mixed in.\n\n"
-                            L"Ticks every 12 dB. Red = closer than 3 dB to clipping.");
         }
 
         const int B = drv_ ? Y + 160 : Y + 76; // buttons
