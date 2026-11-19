@@ -86,7 +86,7 @@ private:
     Config cfg_, orig_;
     std::vector<DevEntry> ren_, cap_;
     std::vector<CheckItem> checks_;
-    bool done_ = false, pendingReset_ = false;
+    bool done_ = false, pendingReset_ = false, previewed_ = false;
     int helpCount_ = 0, ticks_ = 0;
     float dIn_[2]{ -90, -90 }, dOut_[2]{ -90, -90 }, dYt_ = -90;
     std::wstring lastStatus_;
@@ -380,6 +380,17 @@ private:
         SelectObject(dc, of);
     }
 
+    static void writeVolume(float v) {
+        wchar_t b[32]; swprintf_s(b, L"%.2f", v);
+        WritePrivateProfileStringW(L"driver", L"ytVolume", b, configPath().c_str());
+    }
+    // the volume is heard while the slider moves: directly in this process, and through config.ini
+    // (picked up by the driver's watcher) when the window was opened outside the host
+    void previewVolume() {
+        float v = volume() / 100.0f;
+        Driver::setLiveVolumeAll(v);
+        if (!drv_) { writeVolume(v); previewed_ = true; }
+    }
     void updateVolText() {
         wchar_t t[16]; swprintf_s(t, L"%d %%", volume());
         SetWindowTextW(ctl(ID_VOLTXT), t);
@@ -388,11 +399,12 @@ private:
     void updateStatus() {
         std::wstring s;
         if (!drv_) {
-            s = L"Not opened by an ASIO host. Changes apply the next time a host opens the driver.";
+            s = L"Opened outside an ASIO host. A host that is using the driver picks up the changes automatically.";
         } else {
-            Driver::Live l; drv_->live(l);
+            Driver::Live l{};
+            bool ready = Driver::liveAny(l);
             wchar_t t[256];
-            if (!l.ready) s = L"Driver loaded, audio not started. Changes apply when the host starts it.";
+            if (!ready) s = L"Driver loaded, audio not started. Changes apply when the host starts it.";
             else if (l.lost) s = L"UMC22 disconnected: waiting for it to come back. Audio resumes automatically.";
             else {
                 swprintf_s(t, L"%s  |  %ld samples @ %.0f Hz\nLatency: in %.1f ms / out %.1f ms  |  underruns since start: %u",
@@ -466,14 +478,17 @@ private:
         bool reopen = n.render != cfg_.render || n.capture != cfg_.capture || n.loopback != cfg_.loopback ||
                       n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency || n.autoDefault != cfg_.autoDefault;
         writeConfig(n);
-        if (drv_) drv_->applyLive(n);
+        Driver::applyLiveAll(n);
         if (reopen) pendingReset_ = true;
         cfg_ = n;
         logf("control panel: settings saved%s", reopen ? " (driver reset requested)" : "");
     }
     void close(bool ok) {
         if (ok) apply();
-        else if (drv_) drv_->applyLive(cfg_); // undo the live volume preview
+        else {
+            Driver::applyLiveAll(cfg_); // undo the live volume preview
+            if (!drv_ && previewed_) writeVolume(cfg_.ytVolume); // ...also for a host in another process
+        }
         done_ = true;
     }
 
@@ -496,7 +511,7 @@ private:
             if (HIWORD(w) == CBN_SELCHANGE || HIWORD(w) == BN_CLICKED) p->updateApply();
             break;
         case WM_HSCROLL:
-            if ((HWND)lp == p->ctl(ID_VOL)) { p->updateVolText(); if (p->drv_) p->drv_->setLiveVolume(p->volume() / 100.0f); p->updateApply(); }
+            if ((HWND)lp == p->ctl(ID_VOL)) { p->updateVolText(); p->previewVolume(); p->updateApply(); }
             return 0;
         case WM_DRAWITEM: {
             auto di = (const DRAWITEMSTRUCT*)lp;
@@ -542,6 +557,7 @@ private:
         CreateWindowExW(WS_EX_DLGMODALFRAME | (owner ? 0 : WS_EX_APPWINDOW), L"UMC22AsioPanel", title.c_str(), style,
                         x, y, ww, wh, owner, nullptr, g_hInst, this);
         if (!hwnd_) return;
+        g_panelsOpen++;
         build();
         SetTimer(hwnd_, 1, 50, nullptr);
         if (owner) EnableWindow(owner, FALSE);
@@ -558,7 +574,8 @@ private:
         DestroyWindow(hwnd_); hwnd_ = nullptr;
         if (owner) SetForegroundWindow(owner);
         if (quit) PostQuitMessage((int)quitCode); // the host is closing: hand WM_QUIT back to its loop
-        if (pendingReset_ && drv_ && drv_->canReset()) drv_->resetFromPanel();
+        g_panelsOpen--;
+        if (pendingReset_) Driver::resetAll("settings changed in the control panel");
     }
 };
 

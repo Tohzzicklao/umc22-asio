@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.2 — unreleased
+
+- **Fixed: the Windows audio volume slider had no effect when the settings window was opened from Archetype: Nolly X.** The host opens the window on a different driver instance than the one that is playing; live settings now reach every instance, and status and meters come from the one that has the device open.
+- The settings window opened from the Start menu now works while a host is running: the driver watches `config.ini` and applies changes at once (volume, Windows audio buffer, mono copy, diagnostics log), and asks the host to reset it when devices, buffer size, low latency or output switching change. The volume slider is heard live there too.
+- Driver version reported to hosts: 1.2.2.
+
 ## v1.2.1 — 2026-11-19
 
 - Settings window: **Report a problem...** button. It opens a new GitHub issue prefilled with the driver and Windows versions, the host, the settings, the status and the system check (user profile paths are replaced by `%USERPROFILE%`), and opens the log folder so `log.txt` can be attached.

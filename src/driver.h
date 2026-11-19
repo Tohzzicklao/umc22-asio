@@ -5,10 +5,18 @@
 #pragma once
 
 // ============================================================ Driver
+class Driver;
+static std::mutex g_drvMx;                  // guards g_drivers
+static std::vector<Driver*> g_drivers;      // driver instances alive in this process
+static std::atomic<int> g_panelsOpen{ 0 };  // settings windows open in this process
+
 class Driver : public IASIO {
 public:
-    Driver() { g_locks++; }
-    ~Driver() { disposeBuffers(); g_locks--; }
+    Driver() { g_locks++; std::lock_guard<std::mutex> g(g_drvMx); g_drivers.push_back(this); }
+    ~Driver() {
+        { std::lock_guard<std::mutex> g(g_drvMx); g_drivers.erase(std::remove(g_drivers.begin(), g_drivers.end(), this), g_drivers.end()); }
+        disposeBuffers(); g_locks--;
+    }
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
@@ -157,9 +165,11 @@ public:
         }
         engineReady_ = true;
         logf("createBuffers ok: asio=%ld frames, device period=%u frames, %.0f Hz, output slack %ld frames", size, devFrames_, sampleRate_, outPrime_);
+        startWatch();
         return ASE_OK;
     }
     ASIOError disposeBuffers() override {
+        stopWatch();
         stop();
         if (engine_.joinable()) {
             quit_ = true; SetEvent(startEv_);
@@ -191,11 +201,83 @@ public:
     void applyLive(const Config& c) {
         liveVol_ = c.ytVolume; liveYtLat_ = c.ytLatencyMs; liveMono_ = c.monoAuto; liveMeter_ = c.debugMeter;
     }
-    void setLiveVolume(float v) { liveVol_ = v; }
     bool canReset() const { return engineReady_ && cb_ && cb_->asioMessage; }
-    void resetFromPanel() { requestReset("settings changed in the control panel"); }
+
+    // A host can open the settings window on a different driver instance than the one that is playing
+    // (Archetype: Nolly X does). So live settings go to every instance in the process, and status and
+    // meters come from the instance that has the device open.
+    static bool liveAny(Live& l) {
+        std::lock_guard<std::mutex> g(g_drvMx);
+        Driver* best = nullptr;
+        for (auto* d : g_drivers) if (d->engineReady_ && (!best || (d->running_ && !best->running_))) best = d;
+        if (!best) return false;
+        best->live(l);
+        return true;
+    }
+    static void applyLiveAll(const Config& c) { std::lock_guard<std::mutex> g(g_drvMx); for (auto* d : g_drivers) d->applyLive(c); }
+    static void setLiveVolumeAll(float v) { std::lock_guard<std::mutex> g(g_drvMx); for (auto* d : g_drivers) d->liveVol_ = v; }
+    static void resetAll(const char* why) {
+        std::vector<Driver*> v;
+        { std::lock_guard<std::mutex> g(g_drvMx); for (auto* d : g_drivers) if (d->canReset()) v.push_back(d); }
+        for (auto* d : v) d->requestReset(why); // outside the lock: the host may release the driver in response
+    }
 
 private:
+    // ---------------------------------------------------- config.ini watcher
+    // While the device is open, changes to config.ini (settings window in another process, the Start menu
+    // shortcut, a text editor) are applied: live settings at once, the rest through an ASIO reset request.
+    void startWatch() {
+        if (watch_.joinable()) return;
+        watchStop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        watch_ = std::thread([this] { watchLoop(); });
+    }
+    void stopWatch() {
+        if (watch_.joinable()) {
+            SetEvent(watchStop_);
+            if (watch_.get_id() == std::this_thread::get_id()) watch_.detach(); // host disposed us from our own reset request
+            else watch_.join();
+        }
+        if (watchStop_) { CloseHandle(watchStop_); watchStop_ = nullptr; }
+    }
+    static FILETIME configTime() {
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        GetFileAttributesExW(configPath().c_str(), GetFileExInfoStandard, &a);
+        return a.ftLastWriteTime;
+    }
+    static bool needsReopen(const Config& a, const Config& b) {
+        return a.render != b.render || a.capture != b.capture || a.loopback != b.loopback ||
+               a.preferredBuffer != b.preferredBuffer || a.lowLatency != b.lowLatency || a.autoDefault != b.autoDefault;
+    }
+    void watchLoop() {
+        HANDLE ch = FindFirstChangeNotificationW(appDir().c_str(), FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE);
+        if (ch == INVALID_HANDLE_VALUE) return;
+        HANDLE stopEv = watchStop_;
+        FILETIME last = configTime();
+        Config known = loadConfig();
+        HANDLE hs[2] = { stopEv, ch };
+        while (WaitForMultipleObjects(2, hs, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+            FindNextChangeNotification(ch);
+            FILETIME t = configTime();
+            if (CompareFileTime(&t, &last) == 0) continue; // log.txt changed, not config.ini
+            // config.ini is written one key at a time: wait until it stops changing
+            for (;;) {
+                if (WaitForSingleObject(stopEv, 150) == WAIT_OBJECT_0) { FindCloseChangeNotification(ch); return; }
+                FILETIME t2 = configTime();
+                if (CompareFileTime(&t2, &t) == 0) break;
+                t = t2;
+            }
+            last = t;
+            Config n = loadConfig();
+            applyLive(n);
+            bool reopen = needsReopen(n, known);
+            known = n;
+            // with a settings window open in this process, that window requests the reset when it closes
+            if (reopen && g_panelsOpen == 0) requestReset("config.ini changed");
+            else logf("config.ini changed: live settings applied");
+        }
+        FindCloseChangeNotification(ch);
+    }
+
     static void pubMax(std::atomic<float>& a, float v) { if (v > a.load(std::memory_order_relaxed)) a.store(v, std::memory_order_relaxed); }
     void setErr(const char* s) { strncpy_s(err_, s, _TRUNCATE); }
     void restoreDefault() {
@@ -596,5 +678,7 @@ private:
     std::atomic<float> liveVol_{ 1.0f }, liveYtLat_{ 40.0f };
     std::atomic<bool> liveMono_{ true }, liveMeter_{ false }, deviceLost_{ false };
     std::atomic<unsigned> underrunsLive_{ 0 };
+    std::thread watch_;
+    HANDLE watchStop_ = nullptr;
     std::atomic<float> pkIn_[2]{}, pkOut_[2]{}, pkYt_{ 0.0f };
 };
