@@ -260,14 +260,24 @@ static HRESULT openExclusive(IMMDevice* dev, int sr, int periodFrames, HANDLE ev
     if (FAILED(hr)) return hr;
     struct { int bits, valid; } tries[] = { {32, 24}, {24, 24}, {16, 16} };
     WAVEFORMATEXTENSIBLE w{}; bool found = false;
+    // Keep the real reason of the failure: if every format fails with the same non-format
+    // error (device in use, exclusive mode disabled...), return that instead of UNSUPPORTED_FORMAT.
+    HRESULT realHr = S_OK; bool sameHr = true;
     for (int chs : {2, 1}) {
         for (auto t : tries) {
             makeFmt(w, chs, sr, t.bits, t.valid);
-            if (ac->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.Format, nullptr) == S_OK) { found = true; break; }
+            HRESULT fhr = ac->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.Format, nullptr);
+            if (fhr == S_OK) { found = true; break; }
+            logf("  IsFormatSupported %d ch %d/%d-bit %d Hz -> hr=0x%08lX", chs, t.bits, t.valid, sr, (unsigned long)fhr);
+            if (realHr == S_OK) realHr = fhr; else if (realHr != fhr) sameHr = false;
         }
         if (found) break;
     }
-    if (!found) { ac->Release(); return AUDCLNT_E_UNSUPPORTED_FORMAT; }
+    if (!found) {
+        ac->Release();
+        if (sameHr && FAILED(realHr) && realHr != AUDCLNT_E_UNSUPPORTED_FORMAT && realHr != S_FALSE) return realHr;
+        return AUDCLNT_E_UNSUPPORTED_FORMAT;
+    }
     REFERENCE_TIME defP = 0, minP = 0; ac->GetDevicePeriod(&defP, &minP);
     REFERENCE_TIME per = std::max<REFERENCE_TIME>(minP, (REFERENCE_TIME)(1e7 * periodFrames / sr + 0.5));
     DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
