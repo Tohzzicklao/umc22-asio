@@ -230,7 +230,7 @@ private:
         std::wstring b, status = lastStatus_;
         std::replace(status.begin(), status.end(), L'\n', L' ');
         b += L"### What happened\n<!-- What did you do, what did you expect, and what happened instead? Does it happen every time? -->\n\n\n";
-        b += L"### Log\n<!-- Please drag log.txt here: its folder has just been opened for you. -->\n\n\n";
+        b += L"### Log\n<!-- Please drag log.txt here. Its folder (%APPDATA%\\UMC22ASIO) has been opened in File Explorer, behind this window. -->\n\n\n";
         b += L"### System (filled in by the driver)\n";
         wchar_t t[512];
         swprintf_s(t, L"- Driver: %ld.%ld.%ld\n- Windows: %s\n- Host: %s\n",
@@ -245,10 +245,12 @@ private:
         b += L"- Status: " + status + L"\n\n### System check\n";
         static const wchar_t* lv[] = { L"OK", L"Warning", L"Problem" };
         for (auto& c : checks_) b += std::wstring(L"- ") + lv[c.level] + L": " + c.text + L"\n";
-        std::string url = std::string(kRepoUrl) + "/issues/new?body=" + urlEncode(anonymize(b));
-        ShellExecuteA(hwnd_, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        // log folder first, then the browser on top of it: the issue is what the user reads first
         std::wstring args = L"/select,\"" + appDir() + L"\\log.txt\"";
         ShellExecuteW(hwnd_, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+        Sleep(1200); // Explorer opens its window asynchronously; give it time so it doesn't land on top
+        std::string url = std::string(kRepoUrl) + "/issues/new?body=" + urlEncode(anonymize(b));
+        ShellExecuteA(hwnd_, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
     LPARAM comboData(int id) { return SendMessageW(ctl(id), CB_GETITEMDATA, SendMessageW(ctl(id), CB_GETCURSEL, 0, 0), 0); }
