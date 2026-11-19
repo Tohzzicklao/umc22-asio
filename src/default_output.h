@@ -49,3 +49,21 @@ static bool setDefaultRender(const std::wstring& id) {
     });
     return ok;
 }
+
+// Mutes or unmutes an endpoint (the speaker icon of that device in Windows). Loopback capture taps the
+// audio before the mute, so a muted loopback device still feeds the mix. 'was' gets the previous state.
+static bool setEndpointMute(const std::wstring& id, bool mute, bool* was = nullptr) {
+    bool ok = false;
+    runMta([&] {
+        IMMDeviceEnumerator* en = nullptr; IMMDevice* d = nullptr; IAudioEndpointVolume* v = nullptr;
+        if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en))) &&
+            SUCCEEDED(en->GetDevice(id.c_str(), &d)) &&
+            SUCCEEDED(d->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, (void**)&v))) {
+            BOOL m = FALSE; v->GetMute(&m);
+            if (was) *was = m != FALSE;
+            ok = SUCCEEDED(v->SetMute(mute ? TRUE : FALSE, nullptr));
+        }
+        if (v) v->Release(); if (d) d->Release(); if (en) en->Release();
+    });
+    return ok;
+}

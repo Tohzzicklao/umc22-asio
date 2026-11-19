@@ -37,7 +37,7 @@ The Behringer UMC22 (USB Audio CODEC / PCM2902) has **no official ASIO driver**.
 - **Settings window** with device lists, buffer size, Windows audio volume (applied live), status and level meters. Open it from your host or from the Start menu.
 - **Installer** with Start menu shortcut and uninstaller, or a portable zip.
 - **Windows audio mixing**: browser, music players and system sounds are captured via WASAPI loopback and mixed into the UMC22 output (headphones and monitor outputs).
-- **Automatic output switching**: the Windows default output is moved off the UMC22 while the driver is open and restored when it closes.
+- **Automatic output switching**: the Windows default output is moved off the UMC22 while the driver is open (and kept off it, even if it is selected again) and restored when it closes. The source device, for example the laptop speakers, is muted meanwhile, so Windows audio is heard only through the UMC22.
 - **Clean summing**: cubic Hermite resampler with smoothed clock-drift correction, click-free fades, a −0.2 dBFS peak limiter and TPDF dither to 16-bit.
 - **Mono guitar fix**: if the host only sends the left channel, it's copied to the right automatically.
 - **No Steinberg SDK required**, and no runtime dependencies (statically linked DLL).
@@ -107,7 +107,7 @@ Windows 10 or 11, x64. A second Windows output device is used as the source for 
 Use the **settings window**: the **Control Panel** button in your host's ASIO settings, or the Start menu shortcut (or `rundll32 umc22asio.dll,ControlPanel`).
 
 <p align="center">
-  <img src="docs/control-panel.png" alt="Settings window: device lists, buffer size, low latency output, Windows audio volume and buffer, options with help, system check, status and level meters" width="520">
+  <img src="docs/control-panel.png" alt="Settings window: device lists, buffer size, low latency output, Windows audio volume and buffer, options with help, system check and status" width="520">
 </p>
 
 - The Windows audio volume, Windows audio buffer, mono guitar copy and diagnostics log apply **immediately**.
@@ -124,7 +124,8 @@ Settings are stored in `%APPDATA%\UMC22ASIO\config.ini`, which can also be edite
 | `ytLatencyMs` | `40` | Buffer for the Windows audio; raise it if it drops out |
 | `preferredBuffer` | `144` | Preferred ASIO buffer size (frames) |
 | `monoAuto` | `1` | Copy L→R if the host only sends the left channel |
-| `autoDefault` | `1` | Automatically switch/restore the Windows default output |
+| `autoDefault` | `1` | Move the Windows default output off the UMC22 while in use (and back on close) |
+| `muteLoopback` | `1` | Mute the `loopback` device while in use, so Windows audio is heard only through the UMC22 |
 | `debugMeter` | `0` | Log levels, phase correlation and limiter activity every 5 s |
 | `lowLatency` | `1` | No extra output buffer when the device runs at the ASIO buffer size (one buffer less output latency: −3 ms at 144). Set to `0` if you hear clicks |
 
@@ -199,7 +200,7 @@ tools/            Diagnostic utilities (see below)
 
 - 44.1 / 48 kHz only, 2 inputs / 2 outputs.
 - The UMC22 only accepts 16-bit samples in exclusive mode.
-- The onboard output also plays the Windows audio (only audible if something is plugged into it).
+- With `muteLoopback=0`, the onboard output (or the laptop speakers) also plays the Windows audio.
 - `IPolicyConfig`, used to switch the default device, is an undocumented Windows interface.
 
 ## ASIO SDK

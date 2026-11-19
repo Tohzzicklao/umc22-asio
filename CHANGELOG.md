@@ -1,9 +1,11 @@
 # Changelog
 
-## v1.2.2 — unreleased
+## v1.2.2 — 2026-11-19
 
 - **Fixed: the Windows audio volume slider had no effect when the settings window was opened from Archetype: Nolly X.** The host opens the window on a different driver instance than the one that is playing; live settings now reach every instance, and status and meters come from the one that has the device open.
 - The settings window opened from the Start menu now works while a host is running: the driver watches `config.ini` and applies changes at once (volume, Windows audio buffer, mono copy, diagnostics log), and asks the host to reset it when devices, buffer size, low latency or output switching change. The volume slider is heard live there too.
+- **Windows audio only through the UMC22**: new option *Silence the Windows audio device while in use* (`muteLoopback`, on by default). The loopback device (for example the laptop speakers) is muted while the driver runs and unmuted when it stops; its audio still reaches the UMC22, because loopback capture taps it before the mute.
+- **The UMC22 can't be taken back as the Windows output while in use**: if it becomes the default output while the driver has it open (chosen by hand, or by Windows), the driver moves Windows back to the loopback device within a second, so browsers and players don't fail.
 - Driver version reported to hosts: 1.2.2.
 
 ## v1.2.1 — 2026-11-19

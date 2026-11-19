@@ -57,6 +57,7 @@ static void writeConfig(const Config& c) {
     put(L"autoDefault", c.autoDefault ? L"1" : L"0");
     put(L"debugMeter", c.debugMeter ? L"1" : L"0");
     put(L"lowLatency", c.lowLatency ? L"1" : L"0");
+    put(L"muteLoopback", c.muteLoopback ? L"1" : L"0");
 }
 
 class Panel {
@@ -78,7 +79,7 @@ public:
 private:
     enum {
         ID_RENDER = 101, ID_CAPTURE, ID_LOOP, ID_BUF, ID_LOWLAT, ID_VOL, ID_VOLTXT, ID_YTLAT, ID_MONO, ID_AUTODEF,
-        ID_METER, ID_STATUS, ID_M_IN, ID_M_OUT, ID_M_YT, ID_OPENLOG, ID_OPENCFG, ID_APPLY, ID_CHECKS, ID_SOUNDCPL, ID_REPORT,
+        ID_METER, ID_STATUS, ID_M_IN, ID_M_OUT, ID_M_YT, ID_OPENLOG, ID_OPENCFG, ID_APPLY, ID_CHECKS, ID_SOUNDCPL, ID_REPORT, ID_MUTELOOP,
         ID_HELP = 300 // help "?" icons: ID_HELP, ID_HELP + 1...
     };
     struct CheckItem { int level; std::wstring text; }; // level: 0 ok, 1 warning, 2 problem
@@ -237,8 +238,8 @@ private:
                    (kDriverVersion >> 16) & 0xff, (kDriverVersion >> 8) & 0xff, kDriverVersion & 0xff,
                    windowsVersion().c_str(), drv_ ? host : L"(settings opened outside a host)");
         b += t;
-        swprintf_s(t, L"- Settings: buffer %ld, lowLatency %d, ytLatencyMs %.0f, ytVolume %.2f, monoAuto %d, autoDefault %d\n",
-                   cfg_.preferredBuffer, (int)cfg_.lowLatency, cfg_.ytLatencyMs, cfg_.ytVolume, (int)cfg_.monoAuto, (int)cfg_.autoDefault);
+        swprintf_s(t, L"- Settings: buffer %ld, lowLatency %d, ytLatencyMs %.0f, ytVolume %.2f, monoAuto %d, autoDefault %d, muteLoopback %d\n",
+                   cfg_.preferredBuffer, (int)cfg_.lowLatency, cfg_.ytLatencyMs, cfg_.ytVolume, (int)cfg_.monoAuto, (int)cfg_.autoDefault, (int)cfg_.muteLoopback);
         b += t;
         b += L"- Devices: render `" + cfg_.render + L"`, capture `" + cfg_.capture + L"`, loopback `" +
              (cfg_.loopback.empty() ? std::wstring(L"(disabled)") : cfg_.loopback) + L"`\n";
@@ -315,17 +316,21 @@ private:
         check(ID_AUTODEF, L"Move Windows sounds off the UMC22 while in use", X, 304, W, cfg_.autoDefault);
         help(H, 305, L"Apps playing to the UMC22 would block exclusive mode. While the driver runs, the Windows default "
                      L"output is moved to the Windows audio device above, and moved back to the UMC22 when it stops.");
-        check(ID_METER, L"Write levels to log.txt every 5 s (diagnostics)", X, 328, W, cfg_.debugMeter);
+        check(ID_MUTELOOP, L"Silence the Windows audio device while in use", X, 328, W, cfg_.muteLoopback);
+        help(H, 329, L"Mutes the Windows audio device above (for example the laptop speakers) while the driver runs, "
+                     L"so Windows audio is heard only through the UMC22. The driver still receives it: Windows hands it "
+                     L"over before the mute. The device is unmuted again when the driver stops.");
+        check(ID_METER, L"Write levels to log.txt every 5 s (diagnostics)", X, 352, W, cfg_.debugMeter);
 
-        label(L"System check", L, 366, 200, true);
-        add(WC_BUTTONW, L"Sound settings", BS_PUSHBUTTON | WS_TABSTOP, X + 214, 361, 110, 26, ID_SOUNDCPL);
-        help(H, 365, L"What the driver needs to work, checked every 2 seconds.\n\n"
+        label(L"System check", L, 390, 200, true);
+        add(WC_BUTTONW, L"Sound settings", BS_PUSHBUTTON | WS_TABSTOP, X + 214, 385, 110, 26, ID_SOUNDCPL);
+        help(H, 389, L"What the driver needs to work, checked every 2 seconds.\n\n"
                      L"Sound settings opens the classic Windows sound panel, where exclusive mode is allowed: "
                      L"select the UMC22 > Properties > Advanced.");
-        add(L"STATIC", L"", SS_OWNERDRAW, L, 392, 498, 5 * 22, ID_CHECKS);
+        add(L"STATIC", L"", SS_OWNERDRAW, L, 416, 498, 5 * 22, ID_CHECKS);
         checks_ = evaluate();
 
-        const int Y = 516; // status
+        const int Y = 540; // status
         label(L"Status", L, Y, 200, true);
         add(WC_BUTTONW, L"Report a problem...", BS_PUSHBUTTON | WS_TABSTOP, X + 194, Y - 5, 130, 26, ID_REPORT);
         add(L"STATIC", L"", SS_LEFT | SS_NOPREFIX, L, Y + 24, 488, 36, ID_STATUS);
@@ -343,7 +348,7 @@ private:
         add(WC_BUTTONW, L"Apply", BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED, 424, B, 80, 28, ID_APPLY);
         updateStatus();
     }
-    int clientHeight() const { return (drv_ ? 516 + 160 : 516 + 76) + 28 + 14; }
+    int clientHeight() const { return (drv_ ? 540 + 160 : 540 + 76) + 28 + 14; }
 
     static void fillCircle(HDC dc, int x, int y, int d, COLORREF c) {
         HBRUSH b = CreateSolidBrush(c); HPEN p = CreatePen(PS_SOLID, 1, c);
@@ -455,6 +460,7 @@ private:
         n.monoAuto = checked(ID_MONO);
         n.autoDefault = checked(ID_AUTODEF);
         n.debugMeter = checked(ID_METER);
+        n.muteLoopback = checked(ID_MUTELOOP);
         return n;
     }
     // what is on screen differs from the saved settings (volume and buffer compared as shown: % and ms)
@@ -464,7 +470,8 @@ private:
                n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency ||
                std::lround(n.ytVolume * 100.0f) != std::lround(cfg_.ytVolume * 100.0f) ||
                std::lround(n.ytLatencyMs) != std::lround(cfg_.ytLatencyMs) ||
-               n.monoAuto != cfg_.monoAuto || n.autoDefault != cfg_.autoDefault || n.debugMeter != cfg_.debugMeter;
+               n.monoAuto != cfg_.monoAuto || n.autoDefault != cfg_.autoDefault || n.debugMeter != cfg_.debugMeter ||
+               n.muteLoopback != cfg_.muteLoopback;
     }
     void updateApply() {
         bool on = changed();
@@ -476,7 +483,8 @@ private:
         if (!changed()) return;
         Config n = collect();
         bool reopen = n.render != cfg_.render || n.capture != cfg_.capture || n.loopback != cfg_.loopback ||
-                      n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency || n.autoDefault != cfg_.autoDefault;
+                      n.preferredBuffer != cfg_.preferredBuffer || n.lowLatency != cfg_.lowLatency || n.autoDefault != cfg_.autoDefault ||
+                      n.muteLoopback != cfg_.muteLoopback;
         writeConfig(n);
         Driver::applyLiveAll(n);
         if (reopen) pendingReset_ = true;

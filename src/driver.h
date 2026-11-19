@@ -165,6 +165,7 @@ public:
         }
         engineReady_ = true;
         logf("createBuffers ok: asio=%ld frames, device period=%u frames, %.0f Hz, output slack %ld frames", size, devFrames_, sampleRate_, outPrime_);
+        muteSource();
         startWatch();
         return ASE_OK;
     }
@@ -180,6 +181,7 @@ public:
         engineReady_ = false;
         freeBufs();
         restoreDefault(); // the UMC22 is released now: apps can go back to it
+        unmuteSource();
         return ASE_OK;
     }
     ASIOError controlPanel() override;
@@ -246,7 +248,8 @@ private:
     }
     static bool needsReopen(const Config& a, const Config& b) {
         return a.render != b.render || a.capture != b.capture || a.loopback != b.loopback ||
-               a.preferredBuffer != b.preferredBuffer || a.lowLatency != b.lowLatency || a.autoDefault != b.autoDefault;
+               a.preferredBuffer != b.preferredBuffer || a.lowLatency != b.lowLatency || a.autoDefault != b.autoDefault ||
+               a.muteLoopback != b.muteLoopback;
     }
     void watchLoop() {
         HANDLE ch = FindFirstChangeNotificationW(appDir().c_str(), FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE);
@@ -255,7 +258,10 @@ private:
         FILETIME last = configTime();
         Config known = loadConfig();
         HANDLE hs[2] = { stopEv, ch };
-        while (WaitForMultipleObjects(2, hs, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+        for (;;) {
+            DWORD w = WaitForMultipleObjects(2, hs, FALSE, 1000);
+            if (w == WAIT_TIMEOUT) { guardDefault(); continue; } // once a second
+            if (w != WAIT_OBJECT_0 + 1) break;                  // stop requested
             FindNextChangeNotification(ch);
             FILETIME t = configTime();
             if (CompareFileTime(&t, &last) == 0) continue; // log.txt changed, not config.ini
@@ -276,6 +282,33 @@ private:
             else logf("config.ini changed: live settings applied");
         }
         FindCloseChangeNotification(ch);
+    }
+
+    // While the UMC22 is in use, nothing else can play to it: if it becomes the Windows default output
+    // again (chosen by the user, or by Windows), apps following the default would fail. Move it back.
+    void guardDefault() {
+        if (!cfg_.autoDefault || !running_ || deviceLost_) return;
+        std::wstring rid, lid;
+        { std::lock_guard<std::mutex> g(idMx_); rid = renderId_; lid = loopId_; }
+        if (lid.empty() || lower(getDefaultRender()) != lower(rid)) return;
+        if (setDefaultRender(lid)) {
+            switchedDefault_ = true;
+            logf("the UMC22 became the Windows default output while in use: moved back to the Windows audio device");
+        }
+    }
+    // Mute the loopback device (e.g. laptop speakers) so Windows audio is heard only through the UMC22.
+    void muteSource() {
+        if (!cfg_.muteLoopback || loopId_.empty() || mutedLoop_) return;
+        bool was = false;
+        if (setEndpointMute(loopId_, true, &was) && !was) {
+            mutedLoop_ = true;
+            logf("Windows audio device muted while in use (its audio still reaches the UMC22)");
+        }
+    }
+    void unmuteSource() {
+        if (!mutedLoop_) return;
+        mutedLoop_ = false;
+        if (setEndpointMute(loopId_, false)) logf("Windows audio device unmuted");
     }
 
     static void pubMax(std::atomic<float>& a, float v) { if (v > a.load(std::memory_order_relaxed)) a.store(v, std::memory_order_relaxed); }
@@ -358,8 +391,11 @@ private:
         if (!seenAt) { seenAt = GetTickCount64(); logf("UMC22 is back, letting Windows set it up"); }
         if (GetTickCount64() - seenAt < 1500) return false;
         // the IDs can change if it was plugged into another USB port
-        renderId_ = r; captureId_ = c;
-        if (loopId_ == renderId_) loopId_.clear();
+        {
+            std::lock_guard<std::mutex> g(idMx_); // read by the default-output guard
+            renderId_ = r; captureId_ = c;
+            if (loopId_ == renderId_) loopId_.clear();
+        }
         moveDefaultOff(); // Windows may have made it the default output again when it came back
         HRESULT hr = openStreams(en, rEv, cEv, s, true);
         if (FAILED(hr)) {
@@ -657,7 +693,9 @@ private:
     int32_t* outBuf_[2][2]{};
     int bufIdx_ = 0;
     bool monoCopying_ = false;
-    bool switchedDefault_ = false;
+    std::atomic<bool> switchedDefault_{ false };
+    bool mutedLoop_ = false;   // we muted the loopback device and unmute it on close
+    std::mutex idMx_;          // renderId_/captureId_/loopId_ change on reconnect
     int64_t monoSilentFrames_ = 0;
     std::atomic<uint64_t> samplePos_{ 0 }, stampNs_{ 0 };
 

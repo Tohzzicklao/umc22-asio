@@ -40,6 +40,7 @@ struct Config {
     bool autoDefault = true;
     bool debugMeter = false;
     bool lowLatency = true;
+    bool muteLoopback = true;
 };
 
 static void ensureConfig() {
@@ -69,7 +70,10 @@ static void ensureConfig() {
           "debugMeter=0\n"
           "; 1 = no extra output buffer when the device runs at the ASIO buffer size (one buffer\n"
           ";     less output latency: -3 ms at 144 frames). Set to 0 if you hear clicks.\n"
-          "lowLatency=1\n", f);
+          "lowLatency=1\n"
+          "; 1 = while the driver is open, mute the 'loopback' device (e.g. the laptop speakers):\n"
+          ";     Windows audio is then heard only through the UMC22. Unmuted again on close.\n"
+          "muteLoopback=1\n", f);
     fclose(f);
 }
 
@@ -86,6 +90,7 @@ static Config loadConfig() {
     c.autoDefault = GetPrivateProfileIntW(L"driver", L"autoDefault", 1, p.c_str()) != 0;
     c.debugMeter = GetPrivateProfileIntW(L"driver", L"debugMeter", 0, p.c_str()) != 0;
     c.lowLatency = GetPrivateProfileIntW(L"driver", L"lowLatency", 1, p.c_str()) != 0;
+    c.muteLoopback = GetPrivateProfileIntW(L"driver", L"muteLoopback", 1, p.c_str()) != 0;
     return c;
 }
 

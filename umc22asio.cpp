@@ -26,6 +26,7 @@
 #include <timeapi.h>
 #include <objbase.h>
 #include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
